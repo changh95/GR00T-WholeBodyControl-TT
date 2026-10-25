@@ -26,6 +26,10 @@ META = {
     "m3": {"sim": "host-cpu", "vla": "tt:p150a:cloudwalk-research/GR00T-N1.6-G1-PnPAppleToPlate-bf16@2a5b61cc",
            "wbc": "x280:l2cpu3:h0@800MHz"},
 }
+# rt_sim's meta `targets` (the loop's swap targets: its own backends plus --vla-alt / --wbc-alt), as demo.sh configures
+# them: m2 with the GPU VLA as the key-v alternative, m3 as `demo.sh m3 --no-alt` (nothing on the GPU).
+TARGETS = {"m1": {"vla": ["gpu"], "wbc": ["gpu", "ort"]}, "m2": {"vla": ["tt", "gpu"], "wbc": ["gpu", "ort"]},
+           "m3": {"vla": ["tt"], "wbc": ["x280", "ort"]}}
 
 
 def ego_image(seq: int) -> np.ndarray:
@@ -101,6 +105,7 @@ class SynthStream:
                                "rt_factor": 0.999, "seed": self.seed0 + ep,
                                "current": {"vla": "gpu" if self.profile == "m1" else "tt",
                                            "wbc": {"m1": "gpu", "m2": "gpu", "m3": "x280"}[self.profile]},
+                               "targets": TARGETS[self.profile],
                                "endpoints": {"vla": "tcp://127.0.0.1:5565", "wbc": "tcp://127.0.0.1:5556"}}
 
 

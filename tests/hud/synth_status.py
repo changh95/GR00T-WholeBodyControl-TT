@@ -23,7 +23,9 @@ def x280d_msg(seq: int, pid: int = 4242, **over) -> dict:
     m = {"src": "x280d", "pid": pid, "t_ns": time.monotonic_ns(), "seq": seq,
          "backend": "x280:l2cpu3:h0@800MHz:v2-fp16", "uptime_s": 0.2 * seq,
          "tile": 3, "tile_state": "released", "monitor_state": 1, "heartbeat_age_us": 35.0, "seq_done": 50 * seq,
+         "heartbeat": 10**9 + 5_000_000 * seq,  # the hart's 50 MHz mtime, sampled at the default 10 Hz
          "cycles_last": 328000, "cycles_max": 401000, "compute_us_last": 410.0, "duty": 0.0205,
+         "x280d_us_last": 612.0, "x280d_us_p50": 598.0, "x280d_us_p99": 701.0, "calls_ok": 50 * seq,
          "n_runs": 50 * seq, "n_overrun": 0, "n_reentry": 1, "beu_accrued": 0, "ccache_ecc": {"fix": 0, "fail": 0},
          "variant": "v2-fp16", "fw_ver": 0x00020001, "build_id": 0x1A2B3C4D,
          "telemetry": {**TELEMETRY, "timer_heartbeat": 1000 + seq}}
@@ -85,7 +87,9 @@ class StatusPublisher(threading.Thread):
             [b"status", wire.dumps({"src": self.src, "pid": "x", "seq": None, "tile": "three",
                                     "last_ms": [1, 2], "p50_ms": "fast", "core_map": {"grid": "11x10"},
                                     "telemetry": [1], "duty": "high", "ccache_ecc": 7, "calls": float("nan"),
-                                    "monitor_state": {"a": 1}, "heartbeat_age_us": True})],  # every field wrong
+                                    "monitor_state": {"a": 1}, "heartbeat_age_us": True, "heartbeat": "fast",
+                                    "x280d_us_last": [1], "x280d_us_p99": "slow", "calls_ok": 2.5,
+                                    "snapshot_age_ms": "old"})],  # every field wrong
         ]
         return bad[i % len(bad)]
 

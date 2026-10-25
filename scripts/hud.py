@@ -17,7 +17,8 @@ stream or a Tensix/X280 backend is seen (``--chip auto``), or always/never (``on
 The model (``HudModel``) is plain Python over the decoded messages and is tested without pygame; the view
 (``HudView``) draws one frame onto any pygame Surface, so ``--headless`` (SDL_VIDEODRIVER=dummy) can render
 frames to PNG. The processor map comes from the ``meta`` topic's ``processor`` stamps (backend ``info``);
-a stock server without ``info`` ("policy-server") is placed by its port and marked "(cfg)".
+a stock server without ``info`` ("policy-server") is placed by its port and marked "(cfg)". A run with nothing on
+the RTX 5090 (no stamp and no swap target there: an X280 run) gets no 5090 box (``HudModel.gpu_in_run``).
 
     simpy $RT/scripts/hud.py                                   # live, SUB :5570 (+ :5573, :5574), PUSH :5571
     simpy $RT/scripts/hud.py --headless --frames 60 --png /tmp/hud.png --sub tcp://127.0.0.1:PORT
@@ -61,6 +62,11 @@ TERMINAL = ("LATE_REJECT", "GEN_DROP", "TIMEOUT", "ERROR", "DRAINED")
 STATUS_SRCS = ("server_g1", "x280d")
 STATUS_STALE_S = 2.0  # the streams run at 2-10 Hz
 STATUS_MAX_BYTES = 64 * 1024  # a status message is ~1-3 KB; anything this large is not one
+RATE_SPAN_S = 1.0  # counter rates (x280d heartbeat, calls, runs) over about this much of the publisher's clock
+RATE_MIN_S = 0.05  # ... and never over less: snapshots are >= 100 ms apart at 2-10 Hz
+SNAP_STALE_MS = 1000.0  # a snapshot sent this late was not refreshed by x280d's serving thread: no rate from it
+HB_STOP_S = 1.0  # x280d's heartbeat is critical once it has not advanced for this long
+GPU_NAME_RE = re.compile(r"gpu|cuda|5090", re.I)  # a swap target on the RTX 5090 (demo.sh names it "gpu")
 TELEMETRY_KEYS = ("aiclk_mhz", "l2cpuclk_mhz", "asic_temp_c", "vcore_mv", "tdp_w", "tdc_a", "input_power_w",
                   "timer_heartbeat")
 # A simulated publisher's telemetry is invented (kmd.FakeDevice), so it is never shown: x280d --backend sim stamps
@@ -211,6 +217,23 @@ def x280_refs() -> dict:
     return _X280_REFS
 
 
+def _mon_name(v) -> str | None:
+    """x280d's monitor_state as a name (x280d sends the name; a number is looked up in mailbox_layout.STATE)."""
+    if _int(v) is not None:
+        return x280_refs()["states"].get(v)
+    return v if isinstance(v, str) else None
+
+
+def hart_note(xs: dict, rate: float | None) -> str | None:
+    """What x280d's hart is doing: "serving 50/s" while its tile serves calls (``rate`` calls/s) and its monitor is
+    idle or busy (a 5 Hz sample of a 0.28 ms call every 20 ms almost always finds it idle), else the monitor state's
+    name (fault, parked, ...), None if unknown."""
+    name = _mon_name(xs.get("monitor_state"))
+    if rate is not None and rate >= 0.5 and name in (None, "idle", "busy") and xs.get("tile_state") != "burned":
+        return f"serving {rate:.0f}/s"
+    return name
+
+
 def l2cpu_xy(tile: int) -> tuple[int, int]:
     """NoC0 (x, y) of L2CPU<tile>: x280/regs.py's, else the pinned copy L2CPU_NOC0_FALLBACK (display only)."""
     return tuple((x280_refs().get("xy") or {}).get(tile, L2CPU_NOC0_FALLBACK[tile]))
@@ -292,11 +315,22 @@ def core_layout(core_map) -> dict:
     return {"grid": (gx, gy), "counts": counts, "cells": cells, "source": source}
 
 
+def _snap_ns(msg) -> int | None:
+    """When the publisher took the snapshot (its CLOCK_MONOTONIC): t_ns, less x280d's snapshot_age_ms."""
+    t = _int(msg.get("t_ns"))
+    age = _num(msg.get("snapshot_age_ms"))
+    if t is None or age is None or age < 0:
+        return t
+    return t - int(age * 1e6)
+
+
 class ChipModel:
     """The latest status of each Blackhole process, from its out-of-band PUB (PLAN.md §4.3 item 7).
 
     Keeps the last well-formed message per ``src`` as received (fields are type-checked when shown), plus receive
-    time, message count, seq gaps (dropped by the SNDHWM 10 PUB) and publisher restarts (pid changes)."""
+    time, message count, seq gaps (dropped by the SNDHWM 10 PUB) and publisher restarts (pid changes). Counters are
+    turned into rates over consecutive snapshots (``rate``), and the receive time at which x280d's raw heartbeat
+    last advanced is kept: a single snapshot of a deterministic kernel says little, the movement says it is alive."""
 
     def __init__(self):
         self.last: dict[str, dict] = {}
@@ -305,6 +339,8 @@ class ChipModel:
         self.gaps = {s: 0 for s in STATUS_SRCS}
         self.restarts = {s: 0 for s in STATUS_SRCS}
         self.bad = 0
+        self.hist = {s: deque(maxlen=16) for s in STATUS_SRCS}  # (snapshot ns, msg), one per distinct snapshot
+        self.hb_moved: dict[str, int] = {}  # receive ns of the last message whose heartbeat differed
 
     def ingest(self, msg, t_ns: int | None = None) -> bool:
         t_ns = time.monotonic_ns() if t_ns is None else t_ns
@@ -313,16 +349,65 @@ class ChipModel:
             self.bad += 1
             return False
         prev = self.last.get(src)
+        restarted = False
         if prev is not None:
             pid, seq = _int(msg.get("pid")), _int(msg.get("seq"))
             if pid is not None and _int(prev.get("pid")) is not None and pid != prev["pid"]:
                 self.restarts[src] += 1
+                restarted = True
             elif seq is not None and _int(prev.get("seq")) is not None and seq > prev["seq"] + 1:
                 self.gaps[src] += seq - prev["seq"] - 1
+        hist = self.hist[src]
+        if restarted:
+            hist.clear()
+        t_snap = _snap_ns(msg)
+        if t_snap is not None and (not hist or t_snap > hist[-1][0]):  # a re-sent snapshot is no new sample
+            hist.append((t_snap, msg))
+        hb = _int(msg.get("heartbeat"))
+        if hb is not None and (prev is None or restarted or hb != _int(prev.get("heartbeat"))):
+            self.hb_moved[src] = t_ns
         self.last[src] = msg
         self.t_rx[src] = t_ns
         self.rx[src] += 1
         return True
+
+    def rate(self, src: str, key: str, tile: str | None = None) -> float | None:
+        """Per-second increase of the counter ``key`` (under ``tiles[tile]`` if given) over the last ~RATE_SPAN_S of
+        snapshots, on the publisher's clock at the moment the values were read. None without two samples of it, for
+        a counter that only went backwards, or while the newest snapshot was sent stale (x280d did not refresh it)."""
+        hist = self.hist.get(src) or ()
+        if len(hist) < 2:
+            return None
+
+        def val(msg):
+            return _int((_sub(_sub(msg, "tiles"), tile) if tile is not None else msg).get(key))
+
+        t1, m1 = hist[-1]
+        v1 = val(m1)
+        late = _num(self.get(src).get("snapshot_age_ms"))
+        if v1 is None or (late is not None and late > SNAP_STALE_MS):
+            return None
+        for t0, m0 in hist:  # the oldest sample inside the span
+            v0 = val(m0)
+            if v0 is not None and v0 <= v1 and RATE_MIN_S * 1e9 <= t1 - t0 <= RATE_SPAN_S * 1.25e9:
+                return (v1 - v0) * 1e9 / (t1 - t0)
+        return None
+
+    def serving(self, now_ns: int) -> dict[int, float]:
+        """Calls per second each x280d tile is serving while its stream is LIVE: Δn_runs of the tile's monitor (the
+        top-level tile falls back to x280d's own calls_ok); tiles with no rate are left out."""
+        msg = self.get("x280d")
+        if self.state("x280d", now_ns)[0] != "LIVE":
+            return {}
+        tiles = _tiles(msg.get("tile"))
+        out = {}
+        for i, t in enumerate(tiles + [int(k) for k in _sub(msg, "tiles") if str(k).isdigit()]):
+            r = self.rate("x280d", "n_runs") if i == 0 else self.rate("x280d", "n_runs", str(t))
+            if i == 0 and r is None:
+                r = self.rate("x280d", "calls_ok")
+            if r is not None and t not in out:
+                out[t] = r
+        return out
 
     def ingest_raw(self, parts, t_ns: int | None = None) -> bool:
         """One multipart message as received: [b"status", msgpack]."""
@@ -561,6 +646,20 @@ class HudModel:
         return {"vla": vla, "wbc": wbc, "wbc_now": now_be, "fallback": fallback, "caption": caption,
                 "have_meta": bool(proc)}
 
+    def gpu_in_run(self) -> bool:
+        """Whether this run puts anything on the RTX 5090: the VLA or WBC in use (meta ``processor``) or a swap
+        target (meta ``targets``, the --vla-alt / --wbc-alt names). From the run's configuration, not from a tick, so
+        the processor map keeps one layout for the whole run (a swap only moves between configured targets). False
+        before any meta: an X280 run never shows the GPU, not even while the loop is starting."""
+        if not self.meta.get("processor"):
+            return False
+        p = self.processors()
+        if "gpu" in (p["vla"]["device"], p["wbc"]["device"]):
+            return True
+        targets = self.meta.get("targets") if isinstance(self.meta.get("targets"), dict) else {}
+        names = [n for k in ("vla", "wbc") if isinstance(targets.get(k), (list, tuple)) for n in targets[k]]
+        return any(GPU_NAME_RE.search(str(n)) for n in names)
+
     def active_req(self) -> dict | None:
         t = self.last
         return self.req_by_seq.get(t["seq"]) if t else None
@@ -674,7 +773,7 @@ class HudView:
     def draw(self, surf, m: HudModel, now_ns: int, fps: float = 0.0, control: str = "") -> None:
         surf.fill(C["page"])
         self._top(surf, m, now_ns, fps)
-        self._processors(surf, m, (16, 52, 420, 236))
+        self._processors(surf, m, (16, 52, 420, 236), now_ns)
         self._vla(surf, m, (16, 296, 420, 170))
         self._wbc(surf, m, (16, 474, 420, 170))
         self._chunk(surf, m, (452, 52, 400, 132))
@@ -707,22 +806,26 @@ class HudView:
         box = self.pill(surf, label, (1264, 12), fill, anchor="topright")
         self.text(surf, f"HUD {fps:4.1f} fps", (box.left - 12, 16), 13, "muted", mono=True, anchor="topright")
 
-    def _processors(self, surf, m, rect):
+    def _processors(self, surf, m, rect, now_ns):
+        """Host CPU, RTX 5090 and Blackhole boxes. A run with nothing on the GPU (m.gpu_in_run(): e.g. demo.sh m3
+        --no-alt) has no 5090 box: the Blackhole box takes its place and gives each engine a line with its live state."""
         pg = self.pg
         x, y, w, h = rect
         self.panel(surf, rect, "PROCESSOR MAP")
         p = m.processors()
         vla_dev, wbc_dev = p["vla"]["device"], p["wbc"]["device"]
         fb = p["fallback"]
+        bh = [("Tensix: VLA", vla_dev == "tensix", "vla"), ("X280: WBC-MLP", wbc_dev == "x280" and not fb, "wbc")]
         rows = [
             ("Host CPU · Ryzen 9 7950X", [("sim + splicer", True, "ink2"),
                                                 ("VLA", vla_dev == "host", "vla"),
                                                 ("ORT fallback" if fb else "WBC", fb or wbc_dev == "host",
                                                  "serious" if fb else "wbc")]),
-            ("RTX 5090", [("VLA", vla_dev == "gpu", "vla"), ("WBC", wbc_dev == "gpu" and not fb, "wbc")]),
-            ("Blackhole p150a", [("Tensix: VLA", vla_dev == "tensix", "vla"),
-                                 ("X280: WBC-MLP", wbc_dev == "x280" and not fb, "wbc")]),
         ]
+        gpu = m.gpu_in_run()
+        if gpu:
+            rows += [("RTX 5090", [("VLA", vla_dev == "gpu", "vla"), ("WBC", wbc_dev == "gpu" and not fb, "wbc")]),
+                     ("Blackhole p150a", bh)]
         by = y + 30
         for name, chips in rows:
             box = pg.Rect(x + 12, by, w - 24, 46)
@@ -732,15 +835,18 @@ class HudView:
             cx = box.x + 10
             for label, lit, role in chips:
                 img_w = self.font(12, bold=True).size(label)[0] + 16
-                chip = pg.Rect(cx, box.y + 22, img_w, 19)
-                if lit:
-                    pg.draw.rect(surf, C[role], chip, border_radius=4)
-                    self.text(surf, label, chip.center, 12, "page", bold=True, anchor="center")
-                else:
-                    pg.draw.rect(surf, C["grid"], chip, width=1, border_radius=4)
-                    self.text(surf, label, chip.center, 12, "muted", anchor="center")
-                cx += img_w + 8
+                cx = self._proc_chip(surf, pg.Rect(cx, box.y + 22, img_w, 19), label, lit, role).right + 8
             by += 52
+        if not gpu:  # the 5090's row and the Blackhole row as one box, an engine per line
+            box = pg.Rect(x + 12, by, w - 24, 98)
+            lit_any = any(lit for _, lit, _ in bh)
+            pg.draw.rect(surf, C["axis"] if lit_any else C["grid"], box, width=1, border_radius=5)
+            self.text(surf, "Blackhole p150a", (box.x + 10, box.y + 4), 12, "ink2" if lit_any else "muted")
+            img_w = max(self.font(12, bold=True).size(label)[0] for label, _, _ in bh) + 16
+            for i, ((label, lit, role), note) in enumerate(zip(bh, self._bh_notes(m, p, now_ns))):
+                chip = self._proc_chip(surf, pg.Rect(box.x + 10, box.y + 25 + 34 * i, img_w, 19), label, lit, role)
+                if lit and note:
+                    self.text(surf, note, (chip.right + 10, chip.centery), 12, "ink2", anchor="midleft")
         cap = p["caption"] if p["have_meta"] else "waiting for meta (processor stamps)"
         col = "ink" if p["have_meta"] else "muted"
         if self.font(15, bold=True).size(cap)[0] <= w - 24:
@@ -749,6 +855,37 @@ class HudView:
             head, sep, tail = cap.partition(" / ")
             self.text(surf, head + (" /" if sep else ""), (x + 12, y + h - 44), 14, col, bold=True)
             self.text(surf, tail, (x + 12, y + h - 25), 14, col, bold=True)
+
+    def _proc_chip(self, surf, rect, label, lit, role):
+        if lit:
+            self.pg.draw.rect(surf, C[role], rect, border_radius=4)
+            self.text(surf, label, rect.center, 12, "page", bold=True, anchor="center")
+        else:
+            self.pg.draw.rect(surf, C["grid"], rect, width=1, border_radius=4)
+            self.text(surf, label, rect.center, 12, "muted", anchor="center")
+        return rect
+
+    def _bh_notes(self, m, p, now_ns) -> list[str]:
+        """The two-line Blackhole box's live notes (Tensix, X280), from the status streams: server_g1's device p50
+        and calls/s, the X280 tile and what its hart does. Without a live stream, the loop's own round trip p50."""
+        chip, f = m.chip, self._fmt
+        if chip.state("server_g1", now_ns)[0] == "LIVE":
+            dev = _sub(chip.get("server_g1"), "p50_ms").get("device")
+            cps = chip.rate("server_g1", "calls")
+            tensix = " · ".join(([f"device p50 {f(dev)} ms"] if _num(dev) is not None else []) +
+                                ([f"{cps:.1f} calls/s"] if cps is not None else []))
+        else:
+            v = m.vla_stats()["p50_ms"]
+            tensix = f"RTT p50 {v:.1f} ms" if math.isfinite(v) else ""
+        xs = chip.get("x280d")
+        tiles = _tiles(xs.get("tile"))
+        if chip.state("x280d", now_ns)[0] == "LIVE" and tiles:
+            hart = hart_note(xs, chip.serving(now_ns).get(tiles[0]))
+            x280 = " · ".join([",".join(f"L2CPU{t}" for t in tiles)] + ([hart] if hart else []))
+        else:
+            r = m.tick_stats()["rtt_p50_us"]
+            x280 = f"RTT p50 {r:.0f} µs" if math.isfinite(r) else ""
+        return [tensix, x280]
 
     def _kv(self, surf, x, y, key, val, color="ink", w=190):
         self.text(surf, key, (x, y), 13, "muted")
@@ -1003,15 +1140,18 @@ class HudView:
         st_x, age_x = chip.state("x280d", now_ns)
         box = self._src_pill(surf, "X280", st_x, age_x, (x + w - 10, y + 6), xs)
         self._src_pill(surf, "TT", st_tt, age_tt, (box.left - 6, y + 6), tt)
-        self._floorplan(surf, (x + 12, y + 30, w - 24, 150), tt if st_tt != "NO DATA" else {}, xs, st_tt, st_x)
+        serving = chip.serving(now_ns)
+        self._floorplan(surf, (x + 12, y + 30, w - 24, 150), tt if st_tt != "NO DATA" else {}, xs, st_tt, st_x,
+                        serving)
         cw = (w - 36) // 2
         self._tensix_col(surf, (x + 12, y + 198, cw, 190), tt, st_tt)
-        self._x280_col(surf, (x + 24 + cw, y + 198, cw, 190), xs, st_x)
+        self._x280_col(surf, (x + 24 + cw, y + 198, cw, 190), xs, st_x, chip, serving, now_ns)
         self._telemetry_row(surf, (x + 12, y + h - 58, w - 24, 50), chip, now_ns)
 
-    def _floorplan(self, surf, rect, tt, xs, st_tt, st_x):
+    def _floorplan(self, surf, rect, tt, xs, st_tt, st_x, serving):
         """The logical Tensix worker grid coloured by megakernel role, and the NoC0 x = 8 column with the ARC and
-        the four L2CPU tiles at their rows (x280/regs.py); x280d's tile is lit by its ledger and monitor state."""
+        the four L2CPU tiles at their rows (x280/regs.py); x280d's tile is lit by its ledger and monitor state, and
+        labelled "serving N/s" while it serves calls (``serving``: ChipModel.serving)."""
         pg = self.pg
         x, y, w, h = rect
         lay = core_layout(tt.get("core_map")) if isinstance(tt, dict) else {}
@@ -1068,7 +1208,7 @@ class HudView:
             label = f"L2CPU{tile} (8,{ty})" if xy else f"L2CPU{tile}"
             if tile in tiles:
                 look = xs if tile == tiles[0] else {**_sub(more, str(tile)), "tile_state": xs.get("tile_state")}
-                fill, ink, note = self._tile_look(look, st_x)
+                fill, ink, note = self._tile_look(look, st_x, serving.get(tile))
                 pg.draw.rect(surf, C[fill], r, border_radius=3)
                 self.text(surf, f"{label} {note}", (r.x + 4, r.y + 1), 10, ink, bold=True)
             else:
@@ -1077,26 +1217,28 @@ class HudView:
                 self.text(surf, f"{label} {role if xy else ''}".rstrip(), (r.x + 4, r.y + 1), 10, "muted")
 
     @staticmethod
-    def _tile_look(xs, st_x) -> tuple[str, str, str]:
-        """(fill, ink, note) of x280d's tile: lit only while x280d is live and the hart answers."""
+    def _tile_look(xs, st_x, rate=None) -> tuple[str, str, str]:
+        """(fill, ink, note) of x280d's tile: lit only while x280d is live and the hart answers; ``rate``: the calls/s
+        it serves (the note is then "serving N/s", see hart_note)."""
         ledger = xs.get("tile_state") if isinstance(xs.get("tile_state"), str) else None
-        mon = xs.get("monitor_state")
-        mon_name = x280_refs()["states"].get(mon) if _int(mon) is not None else (mon if isinstance(mon, str) else None)
-        note = mon_name or ledger or "?"
+        mon_name = _mon_name(xs.get("monitor_state"))
+        note = hart_note(xs, rate) or ledger or "?"
         if st_x != "LIVE":
             return "axis", "ink2", f"{note} (stale)"
         if ledger == "burned" or mon_name == "fault":
             return "crit", "ink", note
-        if mon_name in ("idle", "busy"):
+        if mon_name in ("idle", "busy") or note.startswith("serving"):
             return "wbc", "page", note
         if mon_name in ("parked", "reentered", "host_gone") or ledger == "parked":
             return "warn", "page", note
         return "serious", "page", note  # fresh / released without a monitor yet / unknown
 
     def _rows(self, surf, x, y, w, rows, live: bool):
+        """key / value rows; a stale source's values are greyed, except a critical one."""
         for i, (k, v, col) in enumerate(rows):
             self.text(surf, k, (x, y + i * 17), 11, "muted")
-            self.text(surf, v, (x + w, y + i * 17), 12, col if live else "muted", mono=True, anchor="topright")
+            self.text(surf, v, (x + w, y + i * 17), 12, col if live or col == "crit" else "muted", mono=True,
+                      anchor="topright")
 
     @staticmethod
     def _fmt(v, fmt="{:.1f}", unit="") -> str:
@@ -1132,20 +1274,51 @@ class HudView:
         ]
         self._rows(surf, x, y + 20, w, rows, state == "LIVE")
 
-    def _x280_col(self, surf, rect, xs, state):
+    @staticmethod
+    def _heartbeat(xs, chip, state, now_ns) -> tuple[str, str]:
+        """(text, colour) of x280d's heartbeat row: the rate of the raw L1 counter (the hart's 50 MHz mtime, so
+        "+50.0 M/s"), critical once it has not advanced for HB_STOP_S or the stream is not live. A publisher without
+        the raw counter: its heartbeat_age_us (which a healthy hart keeps at ~0)."""
+        if _int(xs.get("heartbeat")) is None:
+            age = _num(xs.get("heartbeat_age_us"))
+            if age is None:
+                return "—", "ink"
+            return (f"age {age:.0f} µs" if age < 10_000 else f"age {age / 1e3:.0f} ms"), "crit" if age > 5000 else "ink"
+        if state != "LIVE":
+            return "stream stale", "crit"
+        moved = chip.hb_moved.get("x280d")
+        still = (now_ns - moved) / 1e9 if moved is not None else 0.0
+        snaps = [t for t, _ in chip.hist.get("x280d", ())]
+        period = float(np.median(np.diff(snaps))) / 1e9 if len(snaps) > 2 else 0.0  # a re-sent snapshot at 2 Hz
+        if still > max(HB_STOP_S, 2.5 * period):  # holds one value for ~1 s: not a stop
+            return f"stopped {still:.1f} s", "crit"
+        r = chip.rate("x280d", "heartbeat")
+        if r is None:
+            return "…", "ink"  # one snapshot so far
+        div, unit = next((d, u) for d, u in ((1e9, "G"), (1e6, "M"), (1e3, "k"), (1.0, "")) if r >= d or d == 1.0)
+        return f"+{r / div:.1f} {unit}/s", "ink"
+
+    def _x280_col(self, surf, rect, xs, state, chip, serving, now_ns):
+        """x280d's column: rows that move while it serves (hart state with the calls/s, heartbeat rate, x280d's own
+        per-call µs, calls served) ahead of the counters; the kernel's constant cycles and duty are not repeated."""
         x, y, w, h = rect
-        tname = ",".join(f"L2CPU{t}" for t in _tiles(xs.get("tile"))) or "?"
+        tiles = _tiles(xs.get("tile"))
+        tname = ",".join(f"L2CPU{t}" for t in tiles) or "?"
         self.text(surf, f"X280 · x280d ({tname})", (x, y), 12, "wbc" if state == "LIVE" else "muted", bold=True)
         f = self._fmt
         mon = xs.get("monitor_state")
         mon = x280_refs()["states"].get(mon, str(mon)) if _int(mon) is not None else (
             mon if isinstance(mon, str) else "—")
+        hart = hart_note(xs, serving.get(tiles[0]) if tiles else None) or mon
         ledger = xs.get("tile_state") if isinstance(xs.get("tile_state"), str) else "—"
-        duty = _num(xs.get("duty"))
+        tile_hart = hart if ledger in ("released", "—") else f"{ledger}/{hart}"  # released: the ledger's normal state
+        hb, hb_col = self._heartbeat(xs, chip, state, now_ns)
+        xl, xp = _num(xs.get("x280d_us_last")), _num(xs.get("x280d_us_p99"))
+        x280d = "—" if xl is None and xp is None else f"{f(xl, '{:.0f}')}/{f(xp, '{:.0f}')} µs"
+        calls = _int(xs.get("calls_ok"))
+        cps = chip.rate("x280d", "calls_ok") if state == "LIVE" else None
+        served = "—" if calls is None else f"{calls}" + ("" if cps is None else f" · {cps:.1f}/s")
         ecc = _sub(xs, "ccache_ecc")
-        hb = _num(xs.get("heartbeat_age_us"))
-        cyc = [f(xs.get(k), "{:.0f}") if (_num(xs.get(k)) or 0) < 1e4 else f"{_num(xs.get(k)) / 1e3:.0f}k"
-               for k in ("cycles_last", "cycles_max")]  # mcycle counts; thousands as k
         variant = xs.get("variant") if isinstance(xs.get("variant"), str) else "—"
         dtype = xs.get("dtype") if isinstance(xs.get("dtype"), str) else None  # x280d sends variant and dtype apart
         if dtype and variant != "—" and dtype not in variant:
@@ -1154,12 +1327,11 @@ class HudView:
         bid = _int(xs.get("build_id"))
         ecc_fail = _int(ecc.get("fail"))
         rows = [
-            ("tile / hart", f"{ledger}/{mon}"[:15], "crit" if mon == "fault" or ledger == "burned" else "ink"),
-            ("heartbeat age", "—" if hb is None else (f"{hb:.0f} µs" if hb < 10_000 else f"{hb / 1e3:.0f} ms"),
-             "crit" if hb is not None and hb > 5000 else "ink"),
-            ("compute last", f(xs.get("compute_us_last"), "{:.0f}", " µs"), "ink"),
-            ("cycles l/max", "/".join(cyc) if any(c != "—" for c in cyc) else "—", "ink"),
-            ("duty of 20 ms", "—" if duty is None else f"{100 * duty:.1f} %", "ink"),
+            ("tile / hart", tile_hart[:16], "crit" if mon == "fault" or ledger == "burned" else "ink"),
+            ("heartbeat", hb, hb_col),
+            ("x280d last/p99", x280d, "ink"),
+            ("compute last", f(xs.get("compute_us_last"), "{:.2f}", " µs"), "ink"),
+            ("calls served", served, "ink"),
             ("runs / overrun", f"{f(xs.get('n_runs'), '{:.0f}')} / {f(xs.get('n_overrun'), '{:.0f}')}",
              "serious" if _num(xs.get("n_overrun")) else "ink"),
             ("reentry / BEU", f"{f(xs.get('n_reentry'), '{:.0f}')} / {f(xs.get('beu_accrued'), '{:.0f}')}",

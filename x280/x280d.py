@@ -2387,13 +2387,18 @@ class Server:
     def status_snapshot(self) -> dict:
         """The x280d half of the HUD chip-panel contract (PLAN §4.3 item 7). Unknown -> None, never invented:
         monitor fields need a live hart and an open interlock batch, telemetry needs the CMFW table of a real chip
-        (telemetry_source says which; the sim's is 'none (sim)' and its telemetry always None)."""
+        (telemetry_source says which; the sim's is 'none (sim)' and its telemetry always None).
+        The kernel is deterministic (compute_us_last, cycles_* and duty repeat call after call) and a 5 Hz sample
+        almost always finds the hart idle between calls, so the values that move are sent too: the raw L1
+        heartbeat (the HUD shows its rate; heartbeat_age_us is ~0 on a healthy hart, whose counter moves between
+        any two reads), x280d's own per-call µs and the served-call count."""
         s = self.s
         t = s.tiles[0]
         out = self._status_common()
-        out.update({"tile": t, "tile_state": None, "monitor_state": None, "heartbeat_age_us": None, "seq_done": None,
-                    "cycles_last": None, "cycles_max": None, "compute_us_last": None, "duty": None, "n_runs": None,
-                    "n_overrun": None, "n_reentry": None, "beu_accrued": None,
+        out.update({"tile": t, "tile_state": None, "monitor_state": None, "heartbeat_age_us": None, "heartbeat": None,
+                    "seq_done": None, "cycles_last": None, "cycles_max": None, "compute_us_last": None, "duty": None,
+                    "x280d_us_last": None, "x280d_us_p50": None, "x280d_us_p99": None, "calls_ok": self.counts["ok"],
+                    "n_runs": None, "n_overrun": None, "n_reentry": None, "beu_accrued": None,
                     "ccache_ecc": {"fix": None, "fail": None}, "variant": VARIANT_NAME[s.variant], "dtype": s.dtype,
                     "fw_ver": None, "build_id": None, "telemetry": None})
         try:
@@ -2404,6 +2409,10 @@ class Server:
         if len(ok):
             out["compute_us_last"] = float(ok["compute_us"][-1])
             out["duty"] = float(np.mean(ok["compute_us"]) / 20_000.0)  # compute us per 20 ms tick, last 50 calls
+            x_us = ok["x280d_us"].astype(np.float64)  # request in -> reply ready, per call (varies, unlike compute)
+            p50, p99 = np.percentile(x_us, (50, 99))
+            out.update(x280d_us_last=round(float(x_us[-1]), 1), x280d_us_p50=round(float(p50), 1),
+                       x280d_us_p99=round(float(p99), 1))
         if s.k.fd is None:
             return out
         if self.telemetry_source != TELEMETRY_SOURCE_SIM:
@@ -2415,11 +2424,12 @@ class Server:
             return out
         mb = s.mb[t]
         l1, l36 = mb.l1(), mb.l36()
+        hb_age_ms = self._hb_check(t)  # its one heartbeat read also leaves the raw word in self.hb
         out.update(monitor_state=STATE_NAME.get(l1["state"], l1["state"]), seq_done=l1["seq_done"],
                    cycles_last=l1["cycles_last"], cycles_max=l1["cycles_max"], fw_ver=l1["fw_ver"],
                    n_runs=l36["n_runs"], n_overrun=l36["n_overrun"], n_reentry=l36["n_reentry"],
                    beu_accrued=l36["beu_accrued"], build_id=l36["build_id"],
-                   heartbeat_age_us=round(self._hb_check(t) * 1e3, 1))
+                   heartbeat_age_us=round(hb_age_ms * 1e3, 1), heartbeat=int(self.hb[t][0]))
         now = time.perf_counter()
         if self.ecc_last is None or now - self.t_ecc >= STATUS_ECC_S:
             e = s.k.read_ccache_ecc_counts(t)

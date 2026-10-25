@@ -366,11 +366,18 @@ when unknown, never invented:
   the rest of the grid), `tree`, `telemetry` (always None: ttnn has no read of the CMFW table). Also `ready`,
   `stale`.
 - x280d: `tile`, `tile_state` (ledger: fresh/released/parked/burned), `monitor_state` (the mailbox state as a
-  lower-case **name**, never the number: boot, idle, busy, fault, reentered, host_gone, parked), `heartbeat_age_us`
-  (measured when the serving thread took the snapshot), `seq_done`, `cycles_last`, `cycles_max`, `compute_us_last`,
-  `duty` (compute µs / 20 ms over the last 50 calls), `n_runs`, `n_overrun`, `n_reentry`, `beu_accrued`,
-  `ccache_ecc {fix, fail}` (COUNT registers, at most 1 Hz), `variant` ("v2") and `dtype` ("fp16") as two fields,
-  `fw_ver`, `build_id`, `telemetry`. Extras beyond the shared keys:
+  lower-case **name**, never the number: boot, idle, busy, fault, reentered, host_gone, parked), `heartbeat` (the
+  raw L1 heartbeat word, the hart's 50 MHz mtime, read once per snapshot by the heartbeat check that also gives
+  `heartbeat_age_us`: no extra device read), `heartbeat_age_us` (time since that word last changed as this host saw
+  it, as of the snapshot; kept for compatibility: a healthy hart's word moves between any two reads, so it stays ~0),
+  `seq_done`, `cycles_last`, `cycles_max`, `compute_us_last`, `duty` (compute µs / 20 ms over the last 50 calls),
+  `x280d_us_last` / `x280d_us_p50` / `x280d_us_p99` (x280d's request-in to reply-ready µs over the last 50 OK rows of
+  the tick ring), `calls_ok` (W-WBC calls served with an action since start; 0 before any), `n_runs`, `n_overrun`,
+  `n_reentry`, `beu_accrued`, `ccache_ecc {fix, fail}` (COUNT registers, at most 1 Hz), `variant` ("v2") and `dtype`
+  ("fp16") as two fields, `fw_ver`, `build_id`, `telemetry`. The kernel is deterministic (`compute_us_last`,
+  `cycles_*` and `duty` repeat call after call, 278.07 µs / 222,455 cycles for v3-fp16) and a 0.28 ms call every
+  20 ms is almost never in flight at a snapshot, so `monitor_state` reads idle: what moves while x280d serves is
+  `heartbeat`, `x280d_us_*`, `calls_ok` and `n_runs`. Extras beyond the shared keys:
   - `telemetry_source`: `cmfw` on the device (the CMFW table through the read-only ARC/CSM windows); `none (sim)` on
     `--backend sim`, whose `telemetry` is always None (its FakeDevice has no chip behind it); `cmfw (FakeDevice
     table, unit test)` only in unit tests. `info()` reports it too, plus `status_pub` (the bound URL).
@@ -393,6 +400,20 @@ simulated (a backend `x280-sim:…` / `mock:…`, or a `telemetry_source` naming
 telemetry (sim)", "(server_g1 has no CMFW read)", "(x280d read failed)", "(x280d reports none)", or "chip telemetry
 (CMFW table): no live source". The HUD's exit summary records the last row as `chip_telemetry {src, source, note}`.
 Without `x280.regs` the floorplan uses `hud.L2CPU_NOC0_FALLBACK`, a pinned copy of `regs.L2CPU_XY` (rows 3, 9, 5, 7).
+Counters become rates over ~1 s of consecutive snapshots on the publisher's clock at the moment they were read
+(`t_ns - snapshot_age_ms`; a re-sent snapshot is no new sample, a restart starts over, a snapshot sent more than 1 s
+late gives none). The X280 column shows: tile / hart ("serving N/s" from the tile's Δ`n_runs`/s, else Δ`calls_ok`/s,
+while that is > 0 and the monitor is idle or busy; otherwise the monitor state, e.g. fault, parked, with the ledger
+state when it is not released), heartbeat (Δ`heartbeat`/s, "+50.0 M/s"; critical "stopped N s" once it has not
+advanced for 1 s (2.5 snapshot periods at a slower `--status-hz`), "stream stale" when the stream is; "age N µs" from a publisher without `heartbeat`), x280d
+last/p99 (µs), compute last (µs, two decimals), calls served (`calls_ok` and calls/s), runs / overrun, reentry / BEU,
+ECC fix / fail, variant, fw / build; the floorplan labels x280d's tile "serving N/s" the same way. The processor map
+has no RTX 5090 box when nothing in the run is on the GPU: neither meta `processor` stamp classifies as GPU and no
+meta `targets` name (the loop's swap targets, `--vla-alt` / `--wbc-alt`) matches gpu / cuda / 5090, and before any
+meta (e.g. `demo.sh m3 --no-alt`, `jobs/m3_soak.sh`). It is decided from the run's configuration, never from a tick,
+so the layout holds through fallbacks and swaps; the Blackhole box then takes the freed row and gives each engine a
+line with its live state (server_g1's device p50 and calls/s; the X280 tile and "serving N/s"; without a live
+stream the loop's round-trip p50).
 
 ## rttt (M2): `rttt/server_g1.py` on `:5557`
 

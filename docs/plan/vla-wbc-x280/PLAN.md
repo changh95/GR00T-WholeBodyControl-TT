@@ -819,7 +819,10 @@ Plots: a Gantt chart (ticks against request bars and switches); histograms of pe
 ### 4.3 HUD (`hud.py`, pygame, 1280×720, 30 fps, separate process)
 
 1. **Processor map.** Boxes for Host CPU, RTX 5090 and Blackhole [Tensix | X280], lit by the component that runs there,
-   labelled from the backends' `info` stamps; stamps from stock servers are marked "(cfg)".
+   labelled from the backends' `info` stamps; stamps from stock servers are marked "(cfg)". A run with nothing on
+   the GPU (no backend and no swap target there, e.g. `demo.sh m3 --no-alt`; decided from the run's meta, not from a
+   tick, user request 2026-10-25) has no RTX 5090 box: the Blackhole box takes its row, one line per engine with its
+   live state.
 2. **VLA panel.** Last, p50 and p99 latency over 50 requests, with the server split. d, d̂, s_eff, an in-flight
    spinner, and late/timeout counters.
 3. **Chunk bar.** 30 cells: executed rows, the cursor, and the [d, s+d) window. Age in ms, rows left, and a large red
@@ -832,9 +835,15 @@ Plots: a Gantt chart (ticks against request bars and switches); histograms of pe
    grid and the four L2CPU tiles, plus two status columns:
    - *Tensix (server_g1):* per-call encode/device/decode ms, device duty (device_ms / request period), calls and
      errors, trace/CQ mode, the megakernel core map (static: 8 readers + 1 hub + 96 compute + 5 spares on 11×10).
-   - *X280 (x280d):* tile state from the ledger (fresh/released/parked/burned), monitor `state`, heartbeat age,
-     per-call µs from `mcycle` (L1 `cycles_last`/`cycles_max`) and its duty within the 20 ms tick, `n_runs`,
-     `n_overrun`, `n_reentry`, BEU accrued and CCACHE ECC counters, kernel variant (v1/v2, fp16/fp32), fw build id.
+   - *X280 (x280d):* tile state from the ledger (fresh/released/parked/burned) and monitor `state`, shown as
+     "serving N/s" (Δ`n_runs`/s) while the tile serves and the monitor is idle or busy; heartbeat rate (Δ of the raw
+     L1 heartbeat, the hart's 50 MHz mtime, per second; critical once it stops for > 1 s or the stream is stale);
+     x280d's own per-call µs last/p99 over the last 50 calls; per-call µs from `mcycle` (L1 `cycles_last`, two
+     decimals); calls served and calls/s; `n_runs`, `n_overrun`, `n_reentry`, BEU accrued and CCACHE ECC counters,
+     kernel variant (v1/v2/v3, fp16/fp32), fw build id. The stream also carries `cycles_last`/`cycles_max`, the duty
+     within the 20 ms tick and `heartbeat_age_us`; the column does not repeat them: the kernel is deterministic (the
+     same µs and cycles every call) and the heartbeat word moves between any two reads (age ~0), so they never change
+     on a healthy hart (user request 2026-10-25).
    - *Chip telemetry (CMFW table, ≈ 100 ms snapshot, fw `bh_arc/telemetry.h`):* AICLK, `L2CPUCLK3`, ASIC
      temperature, VCORE, TDP/TDC, input power, `TIMER_HEARTBEAT`. Read from memory only: no ARC messages and **no
      tt-smi** (§5.2 invariant 3; a new fd sends power messages).

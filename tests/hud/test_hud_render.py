@@ -182,9 +182,12 @@ def test_render_states_to_png(pg, tmp_path):
     # status pill (top right) and the lit Blackhole chips differ by state
     assert pixel(out["nodata"], (1258, 22)) == hud.C["crit"]
     assert pixel(out["m1"], (1258, 22)) == hud.C["good"]
-    tensix_chip = (41, 217)  # Blackhole row, first chip, left padding
-    assert pixel(out["m3_starved"], tensix_chip) == hud.C["vla"]
-    assert pixel(out["m1"], tensix_chip) != hud.C["vla"]
+    # M1 (GPU VLA and WBC): Host, RTX 5090 and Blackhole rows; the Blackhole row's Tensix chip is unlit
+    gpu_vla_chip, bh_row_chip = (44, 168), (41, 217)
+    assert pixel(out["m1"], gpu_vla_chip) == hud.C["vla"] and pixel(out["m1"], bh_row_chip) != hud.C["vla"]
+    # M3 (Tensix + X280, nothing on the GPU): no 5090 row, the Blackhole box moves up into its place
+    assert pixel(out["m3_starved"], gpu_vla_chip) == hud.C["vla"]  # the Tensix chip now
+    assert pixel(out["m3_starved"], (44, 202)) == hud.C["wbc"]  # X280: WBC-MLP on the box's second line
     # ego thumbnail is drawn (gradient, not the panel colour) only once a thumbnail arrived
     assert pixel(out["m1"], (1200, 300)) != hud.C["panel"]
     assert pixel(out["nodata"], (1200, 300)) == hud.C["panel"]
@@ -324,10 +327,12 @@ class RecordingView(hud.HudView):
         super().__init__(pg, **kw)
         self.drawn: list[str] = []
         self.at: list[tuple[str, tuple]] = []
+        self.color: dict[str, object] = {}
 
     def text(self, surf, s, pos, *a, **kw):
         self.drawn.append(str(s))
         self.at.append((str(s), tuple(pos)))
+        self.color[str(s)] = kw.get("color", a[1] if len(a) > 1 else "ink")
         return super().text(surf, s, pos, *a, **kw)
 
     def pill(self, surf, s, pos, *a, **kw):
@@ -338,6 +343,11 @@ class RecordingView(hud.HudView):
     def in_chip_panel(self) -> list[str]:
         x, y, w, h = CHIP_RECT
         return [s for s, (px, py) in self.at if x <= px <= x + w and y <= py <= y + h]
+
+    def row(self, key: str) -> str:
+        """The value drawn on a key's line: the nearest string to its right at the same y (chip panel columns)."""
+        kx, ky = next(pos for s, pos in self.at if s == key)
+        return min(((px, s) for s, (px, py) in self.at if py == ky and px > kx), default=(0, None))[1]
 
 
 def draw(pg, m, now, chip="auto"):
@@ -462,12 +472,16 @@ def test_chip_panel_shows_the_contract_fields(pg, tmp_path):
     for want in ("BLACKHOLE p150a", "TT LIVE", "X280 LIVE", "Tensix 11×10 (logical)", "8 reader", "1 hub",
                  "96 compute", "5 spare", "L2CPU3 (8,7) idle", "L2CPU2 (8,5) spare", "L2CPU0 (8,3) reserved",
                  "2.6/39.4/0.1", "2.5/39.3/0.1", "42.2/42.0", "12 %", "6 / 0", "on / 2", "MK@009de892c89",
-                 "X280 · x280d (L2CPU3)", "released/idle", "35 µs", "410 µs", "328k/401k", "2.1 %",
+                 "X280 · x280d (L2CPU3)", "410.00 µs", "612/701 µs",
                  "100 / 0", "1 / 0", "0 / 0", "v2-fp16", "0x20001 1a2b3c4d",
                  "AICLK 1350 MHz", "L2CPUCLK3 800 MHz", "ASIC 52.5 °C", "VCORE 750 mV", "TDP 48 W",
                  "TDC 62 A", "in 55 W", "TIMER_HEARTBEAT 1002", "CMFW table via x280d"):
         assert want in s, want
     assert "TICK TIMING (last 60 s)" not in s  # the panel takes the histograms' place
+    # two snapshots microseconds apart: no rate yet, so the hart shows its monitor state and the heartbeat waits
+    assert (view.row("tile / hart"), view.row("heartbeat"), view.row("calls served")) == ("idle", "…", "100")
+    for gone in ("heartbeat age", "cycles l/max", "duty of 20 ms", "328k/401k", "2.1 %"):  # constants, not repeated
+        assert gone not in s, gone
     lit = pixel(surf, (830, 324))  # L2CPU3's box in the x = 8 column (right of its label): a live, idle hart
     assert lit == hud.C["wbc"], lit
     if mk_available():
@@ -611,3 +625,163 @@ def test_chip_panel_variant_and_dtype_from_x280d(pg):
     assert "v2-fp16" in s and "v2-fp16-fp16" not in s
     m, now = chip_model(variant="v2-fp16", dtype="fp16")
     assert "v2-fp16-fp16" not in "\n".join(draw(pg, m, now)[1].in_chip_panel())
+
+
+# --- X280 runs: no RTX 5090 on the map, live X280 values (user request 2026-10-25) ------------------------------
+
+
+def x280_stream(m, now, n=8, hz=5.0, hb_hz=50e6, calls_hz=50.0, hb_frozen_from=None, rx_lag_s=0.0, **over):
+    """Feed m.chip an x280d stream as x280d sends it: n snapshots at hz ending at `now` - rx_lag_s, each taken
+    snapshot_age_ms before its send time; the heartbeat (50 MHz mtime) and the counters advance with the snapshot
+    time, the heartbeat stops at message hb_frozen_from. Publisher and HUD share CLOCK_MONOTONIC here."""
+    rng = np.random.default_rng(3)
+    t_end = now - int(rx_lag_s * 1e9)
+    period_ms = int(1e3 / hz)
+    hb = 0
+    for i in range(n):
+        t_send = t_end - (n - 1 - i) * period_ms * 10**6
+        age_ms = 20 * int(rng.integers(0, period_ms // 20))  # 20 ms steps keep the counters exact integers
+        off_ms = (t_send - t_end) // 10**6 - age_ms  # snapshot time relative to t_end
+        if hb_frozen_from is None or i < hb_frozen_from:
+            hb = 10**12 + int(hb_hz // 1000) * off_ms
+        calls = 10_000 + off_ms * int(calls_hz) // 1000
+        msg = x280d_msg(i + 1, **{"t_ns": t_send, "snapshot_age_ms": float(age_ms), "monitor_state": "idle",
+                                  "heartbeat": hb, "calls_ok": calls, "n_runs": 7 + calls, "compute_us_last": 278.07,
+                                  "cycles_last": 222_455, "cycles_max": 223_041, "duty": 0.0139, **over})
+        m.chip.ingest(wire.loads(wire.dumps(msg)), t_send + 500_000)
+    return m
+
+
+def test_chip_model_rates_from_snapshot_times():
+    """Rates use the publisher's clock at the moment each value was read (t_ns - snapshot_age_ms), over ~1 s of
+    snapshots: exact for a counter linear in time, whatever the send jitter; no rate from a re-sent snapshot, across
+    a restart, from a counter that went backwards or from a snapshot sent stale."""
+    c = hud.ChipModel()
+    now = 50 * 10**9
+    for i in range(10):
+        t = now - (9 - i) * 200_000_000
+        age = (37 * i) % 150
+        snap_s = (t - age * 10**6) / 1e9
+        assert c.ingest(x280d_msg(i + 1, t_ns=t, snapshot_age_ms=float(age), heartbeat=int(50e6 * snap_s),
+                                  calls_ok=int(1000 * snap_s), tiles={"2": {"n_runs": int(20 * snap_s)}}), t)
+    assert abs(c.rate("x280d", "heartbeat") - 50e6) < 1.0
+    assert abs(c.rate("x280d", "calls_ok") - 1000) < 2.0 and abs(c.rate("x280d", "n_runs", "2") - 20) < 2.0
+    assert c.rate("x280d", "no_such_key") is None and c.rate("server_g1", "calls") is None
+    n = len(c.hist["x280d"])
+    last = dict(c.get("x280d"))
+    c.ingest({**last, "seq": last["seq"] + 1, "t_ns": last["t_ns"] + 200_000_000,
+              "snapshot_age_ms": last["snapshot_age_ms"] + 200.0}, now + 200_000_000)  # the same snapshot again
+    assert len(c.hist["x280d"]) == n and abs(c.rate("x280d", "heartbeat") - 50e6) < 1.0
+    c.ingest({**last, "seq": 99, "t_ns": now + 400_000_000, "snapshot_age_ms": 1500.0}, now + 400_000_000)
+    assert c.rate("x280d", "heartbeat") is None  # sent 1.5 s after it was taken: x280d's serving thread is stuck
+    c.ingest(x280d_msg(1, pid=777, t_ns=now + 600_000_000, heartbeat=5, calls_ok=5), now + 600_000_000)
+    assert c.restarts["x280d"] == 1 and len(c.hist["x280d"]) == 1 and c.rate("x280d", "heartbeat") is None
+    c.ingest(x280d_msg(2, pid=777, t_ns=now + 800_000_000, heartbeat=10_000_005, calls_ok=15), now + 800_000_000)
+    assert abs(c.rate("x280d", "heartbeat") - 50e6) < 1.0 and abs(c.rate("x280d", "calls_ok") - 50) < 1e-6
+    c.ingest(x280d_msg(3, pid=777, t_ns=now + 10**9, heartbeat=20_000_005, calls_ok=3), now + 10**9)
+    assert c.rate("x280d", "calls_ok") is None  # went backwards against every sample in the span
+
+
+def test_x280_column_shows_live_values(pg):
+    """The values that move while x280d serves: hart and tile "serving 50/s" (not the momentary idle), the
+    heartbeat's rate, x280d's own per-call µs, calls served with calls/s; compute with two decimals."""
+    m, now = chip_model(x280=False)
+    x280_stream(m, now)
+    surf, view = draw(pg, m, now)
+    s = "\n".join(view.in_chip_panel())
+    assert view.row("tile / hart") == "serving 50/s" and view.color["serving 50/s"] == "ink"
+    assert view.row("heartbeat") == "+50.0 M/s" and view.color["+50.0 M/s"] == "ink"
+    assert view.row("x280d last/p99") == "612/701 µs" and view.row("compute last") == "278.07 µs"
+    served = view.row("calls served")
+    assert served.endswith(" · 50.0/s") and int(served.split(" · ")[0]) == m.chip.get("x280d")["calls_ok"]
+    assert "L2CPU3 (8,7) serving 50/s" in s and "idle" not in s
+    assert pixel(surf, (830, 324)) == hud.C["wbc"]  # lit as a serving hart
+    assert m.chip.serving(now) == {3: pytest.approx(50.0)}
+
+
+@pytest.mark.parametrize("case,hart,hb,tile_note", [
+    ("frozen", "serving 50/s", "stopped", "serving 50/s"),  # the hart's heartbeat stopped: critical within 1 s
+    ("stale", "idle", "stream stale", "idle (stale)"),  # nothing for 3 s: no rate is claimed
+    ("fault", "fault", "+50.0 M/s", "fault"),  # the real monitor state, never "serving"
+    ("parked", "parked/parked", "+50.0 M/s", "parked"),
+    ("old", "serving 50/s", "age 35 µs", "serving 50/s"),  # a publisher without the raw counter
+])
+def test_x280_column_when_not_healthy(pg, case, hart, hb, tile_note):
+    m, now = chip_model(x280=False)
+    kw = {"frozen": {"hb_frozen_from": 2}, "stale": {"rx_lag_s": 3.0}, "fault": {"monitor_state": "fault"},
+          "parked": {"monitor_state": "parked", "tile_state": "parked"}, "old": {}}[case]
+    x280_stream(m, now, **kw)
+    if case == "old":  # same stream, without the raw heartbeat: the HUD falls back to heartbeat_age_us
+        m.chip.last["x280d"] = {k: v for k, v in m.chip.get("x280d").items() if k != "heartbeat"}
+    surf, view = draw(pg, m, now)
+    assert view.row("tile / hart") == hart
+    got = view.row("heartbeat")
+    assert got.startswith(hb), got
+    assert view.color[got] == ("crit" if case in ("frozen", "stale") else "ink")
+    assert f"L2CPU3 (8,7) {tile_note}" in "\n".join(view.in_chip_panel())
+
+
+@pytest.mark.parametrize("profile,targets,gpu", [
+    ("m1", None, True), ("m2", None, True),
+    ("m3", None, False),  # demo.sh m3 --no-alt: Tensix VLA, X280 WBC, ORT the only alternative
+    ("m3", {"vla": ["tt"], "wbc": ["x280", "ort", "gpu"]}, True),  # demo.sh m3 with the GPU WBC as key-w target
+    ("m3", {"vla": ["tt", "cuda5090"], "wbc": ["x280", "ort"]}, True),
+])
+def test_processor_map_shows_the_gpu_only_when_the_run_uses_it(pg, profile, targets, gpu):
+    m = feed(hud.HudModel(), profile, stop=(0, 120))
+    if targets is not None:
+        m.ingest(b"meta", {**m.meta, "targets": targets})
+    assert m.gpu_in_run() is gpu
+    surf, view = draw(pg, m, time.monotonic_ns())
+    s = "\n".join(view.drawn)
+    assert ("RTX 5090" in s) is gpu
+    if not gpu:  # no GPU wording anywhere in the frame; the Blackhole box has an engine per line
+        assert not [t for t in view.drawn if "5090" in t or "gpu" in t.lower()], s
+        assert pixel(surf, (44, 168)) == hud.C["vla"] and pixel(surf, (44, 202)) == hud.C["wbc"]
+
+
+def test_processor_map_layout_follows_the_run_not_the_tick(pg):
+    """The decision comes from the run's meta (processor stamps and swap targets), so a fallback tick (ORT) or a WBC
+    swap between configured targets never moves the boxes; before any meta the GPU is not shown."""
+    assert hud.HudModel().gpu_in_run() is False
+    m = hud.HudModel()
+    seen = set()
+    for topic, f in SynthStream(ticks_per_ep=300, profile="m3").episode(0):
+        if topic == "ego":
+            f = {"seq": f[0], "k_obs": f[1], "img": f[2]}
+        m.ingest(topic.encode(), f)
+        if m.meta:
+            seen.add(m.gpu_in_run())
+    assert seen == {False} and m.n_fallback >= 1
+    m = feed(hud.HudModel(), "m3", stop=(0, 60))
+    alt = {"vla": ["tt"], "wbc": ["x280", "ort", "gpu"]}
+    m.ingest(b"meta", {**m.meta, "targets": alt})
+    assert m.gpu_in_run()
+    m.ingest(b"meta", {**m.meta, "targets": alt, "processor": {**m.meta["processor"], "wbc": "cuda-graph:rtx5090"},
+                       "current": {"vla": "tt", "wbc": "gpu"}})  # swapped to the GPU target (key w)
+    assert m.gpu_in_run()
+
+
+def test_blackhole_box_notes_without_the_gpu(pg):
+    """The freed row: each Blackhole engine gets a line with what it is doing, from the status streams, or the
+    loop's round trip without them."""
+    m, now = chip_model(x280=False)
+    x280_stream(m, now)
+    view = draw(pg, m, now)[1]
+    assert "L2CPU3 · serving 50/s" in view.drawn and "device p50 39.3 ms" in view.drawn
+    m = feed(hud.HudModel(), "m3", stop=(0, 120))  # no status streams (--status-pub off)
+    view = draw(pg, m, time.monotonic_ns(), chip="off")[1]
+    assert "RTT p50 64.0 ms" in view.drawn and any(t.startswith("RTT p50 ") and t.endswith(" µs") for t in view.drawn)
+
+
+def test_heartbeat_not_stopped_by_a_resent_snapshot_at_2_hz(pg):
+    """At --status-hz 2 x280d may send one snapshot twice (the serving thread refreshes it at most every 0.5 s), so
+    the heartbeat holds one value for ~1 s on a healthy hart: "stopped" waits 2.5 snapshot periods there."""
+    m, now = chip_model(x280=False)
+    x280_stream(m, now - 1_050_000_000, n=6, hz=2.0)  # the last fresh snapshot arrived 1.05 s ago
+    last = dict(m.chip.get("x280d"))
+    m.chip.ingest({**last, "seq": last["seq"] + 1, "t_ns": last["t_ns"] + 500_000_000,
+                   "snapshot_age_ms": last["snapshot_age_ms"] + 500.0}, now - 550_000_000)  # re-sent 0.5 s later
+    assert draw(pg, m, now)[1].row("heartbeat") == "+50.0 M/s"
+    got = draw(pg, m, now + 300_000_000)[1].row("heartbeat")
+    assert got.startswith("stopped 1.3"), got

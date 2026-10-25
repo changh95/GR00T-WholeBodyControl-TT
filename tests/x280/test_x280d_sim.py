@@ -1399,7 +1399,8 @@ def test_bench_pilot_deadline_scalar_cap_and_quiesce_before_load(hold, monkeypat
 # --- --status-pub (PLAN §4.3 item 7, the HUD chip panel) -----------------------------------------------------------
 
 STATUS_KEYS = {"src", "pid", "t_ns", "seq", "backend", "uptime_s", "tile", "tile_state", "monitor_state",
-               "heartbeat_age_us", "seq_done", "cycles_last", "cycles_max", "compute_us_last", "duty", "n_runs",
+               "heartbeat_age_us", "heartbeat", "seq_done", "cycles_last", "cycles_max", "compute_us_last", "duty",
+               "x280d_us_last", "x280d_us_p50", "x280d_us_p99", "calls_ok", "n_runs",
                "n_overrun", "n_reentry", "beu_accrued", "ccache_ecc", "variant", "fw_ver", "build_id", "telemetry"}
 TELEMETRY_KEYS = {"aiclk_mhz", "l2cpuclk_mhz", "asic_temp_c", "vcore_mv", "tdp_w", "tdc_a", "input_power_w",
                   "timer_heartbeat"}
@@ -1473,6 +1474,8 @@ def test_status_pub_contract_on_the_fake_device(monkeypatch, hold):
         assert m["seq_done"] == s.mb[3].seq and m["fw_ver"] == ml.FW_VER and m["build_id"] == s.monitor[3]["l36"]["build_id"]
         assert m["variant"] == "v3" and m["ccache_ecc"] == {"fix": 0, "fail": 0}
         assert m["compute_us_last"] > 0 and 0 < m["duty"] < 1 and m["heartbeat_age_us"] is not None
+        assert isinstance(m["heartbeat"], int) and m["heartbeat"] > 0 and m["calls_ok"] == 60 == srv.counts["ok"]
+        assert 0 < m["x280d_us_p50"] <= m["x280d_us_p99"] and m["x280d_us_last"] > 0
         tel = m["telemetry"]
         assert m["telemetry_source"] == D.TELEMETRY_SOURCE_TEST == srv.info()["telemetry_source"]
         assert set(tel) == TELEMETRY_KEYS and tel["l2cpuclk_mhz"] == [800] * 4 and tel["aiclk_mhz"] == 800
@@ -1500,7 +1503,47 @@ def test_status_pub_unknown_values_are_none_before_boot(monkeypatch, hold):
         m = _sub(srv.pub.endpoint, n=1)[0]
         assert m["monitor_state"] is None and m["cycles_last"] is None and m["n_runs"] is None
         assert m["duty"] is None and m["ccache_ecc"] == {"fix": None, "fail": None}
+        assert m["heartbeat"] is None and m["heartbeat_age_us"] is None and m["calls_ok"] == 0
+        assert m["x280d_us_last"] is None and m["x280d_us_p50"] is None and m["x280d_us_p99"] is None
         assert m["telemetry"]["aiclk_mhz"] == 800 and m["tile_state"] in (None, "fresh")
+    finally:
+        srv.close()
+        s.close()
+
+
+def test_status_snapshot_values_that_move(monkeypatch, hold):
+    """The HUD's live X280 values (user request 2026-10-25): the raw L1 heartbeat (the hart's mtime: it advances
+    between snapshots, while heartbeat_age_us stays ~0 on a healthy hart), x280d_us last/p50/p99 over the last 50 OK
+    rows of the tick ring, and the served-call count. The snapshot reads the heartbeat word once, in the _hb_check
+    heartbeat_age_us already used: no new device read."""
+    _patched_chip(monkeypatch, telemetry=FAKE_TELEMETRY)
+    s = D.Session("sim", ledger_path=hold)
+    srv = D.Server(s, _free_port(), status_pub="0", fake_telemetry=True)
+    try:
+        s.boot()
+        with s.batch(3):
+            s.load_blob(3)
+        srv.health(force=True)
+        for i in range(70):
+            assert "error" not in srv.gear_wbc_action(BAL, np.zeros((1, 516), np.float32), tick=i, seq=i)
+        mb = s.mb[3]
+        reads = []
+        real_hb = mb.heartbeat
+        monkeypatch.setattr(mb, "heartbeat", lambda: reads.append(1) or real_hb())
+        a = srv.status_snapshot()
+        assert len(reads) == 1 and a["heartbeat"] == srv.hb[3][0]
+        time.sleep(0.05)
+        b = srv.status_snapshot()
+        assert len(reads) == 2 and b["heartbeat"] > a["heartbeat"] and b["heartbeat_age_us"] < 1000
+        ok = srv._recent_ok(50)
+        assert len(ok) == 50 and b["calls_ok"] == 70 == srv.counts["ok"]
+        x_us = ok["x280d_us"].astype(np.float64)
+        assert b["x280d_us_last"] == round(float(x_us[-1]), 1)
+        assert b["x280d_us_p50"] == round(float(np.percentile(x_us, 50)), 1)
+        assert b["x280d_us_p99"] == round(float(np.percentile(x_us, 99)), 1)
+        srv._record(time.perf_counter_ns(), 70, 70, 0, 3, 0, D.ST_STALL, D.EARLY_NONE)  # a failed call: not served
+        c = srv.status_snapshot()
+        assert c["calls_ok"] == 70 and c["x280d_us_last"] == b["x280d_us_last"]
     finally:
         srv.close()
         s.close()
