@@ -5,6 +5,16 @@ MuJoCo (GR00T-WholeBodyControl, apple-to-plate). GR00T N1.6 runs on the Tensix g
 runs every 50 Hz tick on the chip's on-die SiFive X280 RISC-V cores. The control loop is shaped like a real robot's:
 the WBC runs every tick while the VLA produces 30-row action chunks asynchronously in the background.
 
+## Demo
+
+[![G1 apple-to-plate: GR00T N1.6 on Blackhole Tensix, gear_wbc WBC on the on-die X280](docs/media/demo_seed2000.gif)](https://github.com/changh95/GR00T-WholeBodyControl-TT/releases/download/demo-videos/g1_tensix_vla_x280_wbc_seed2000.mp4)
+
+One Blackhole p150a runs the whole stack: GR00T N1.6 on the Tensix grid, the gear_wbc whole-body MLP on the chip's
+X280 (L2CPU3, 800 MHz, 0.385 ms per call), the 50 Hz loop on the host. Left: the MuJoCo viewer; right: the live HUD
+(processor map, Blackhole panel with the Tensix megakernel layout and the X280 status, ego view of the active chunk).
+Full-resolution recordings (1920x1080): [seed 2000, success at tick 854](https://github.com/changh95/GR00T-WholeBodyControl-TT/releases/download/demo-videos/g1_tensix_vla_x280_wbc_seed2000.mp4),
+[seed 2009, success at tick 1283](https://github.com/changh95/GR00T-WholeBodyControl-TT/releases/download/demo-videos/g1_tensix_vla_x280_wbc_seed2009.mp4).
+
 | Milestone | VLA | WBC | Status |
 |---|---|---|---|
 | M1 | RTX 5090 | RTX 5090 (CUDA graph) | done: async loop costs no success (T-1.9), RT timing 18/18 (T-1.4) |
