@@ -1,0 +1,277 @@
+--- a/rtloop/loop.py
++++ b/rtloop/loop.py
+@@ -28,7 +28,7 @@
+ 
+ import numpy as np
+ 
+-from rtloop import affinity, clock, sim_env, telemetry, viewer
++from rtloop import affinity, clock, control, sim_env, telemetry, viewer
+ from rtloop import splicer as sp
+ from rtloop.schema import (ARMS, MAX_EPISODE_TICKS, TICK_NS, VIDEO_KEY, WAIST, WBC_BALANCE,
+                            ChunkStatus, Chunk, EpisodeEnd, Outcome, VlaBackend, WbcBackend,
+@@ -195,6 +195,15 @@
+             shadow = None if args.no_shadow else self.ort  # D16: ORT shadow on every call
+         self.runtime = wb.WbcRuntime(primary, shadow, dump=[] if args.dump_obs516 else None)
+         wb.install(self.runtime)  # before the env builds its G1GearWbcPolicy (D5)
++        # WBC swap targets (HUD key w, PLAN.md §1.4.5, WP-3.9): connected and parity-checked here, never
++        # on the tick path. "ort" is always one; the primary is named by its backend (gpu, x280, ...).
++        self.wbc_name = "ort" if args.wbc == "ort" else primary.backend.name.lower()
++        self.wbc_targets = {self.wbc_name: primary, "ort": self.ort}
++        for name, url in control.parse_targets(args.wbc_alt).items():
++            if name in self.wbc_targets:
++                raise ValueError(f"--wbc-alt {name}: name already used by {list(self.wbc_targets)}")
++            self.wbc_targets[name] = wb.ZmqWbc(url, fallback=self.ort, timeout_ms=args.wbc_timeout_ms,
++                                               latch=not args.wbc_no_latch, ctx=self.ctx)
+ 
+         if args.viewer:
+             viewer.patch_viewer_camera()
+@@ -214,6 +223,27 @@
+         self.vla_be = vla_backend_of(self.vla_info)
+         self.pub = telemetry.Publisher(args.pub, ctx=self.ctx) if args.pub else telemetry.Publisher(None)
+         self.pub_on = bool(args.pub)
++        # VLA swap targets (HUD key v, WP-2.8): pinged, info'd and modality-checked here; a swap is
++        # applied in the next reset window, where gen is bumped anyway (PLAN.md §1.4.5).
++        self.vla_name = self.vla_be.name.lower()
++        self.vla_clients = {self.vla_name: (self.vla, self.vla_info)}
++        for name, url in control.parse_targets(args.vla_alt).items():
++            if name in self.vla_clients:
++                raise ValueError(f"--vla-alt {name}: name already used by {list(self.vla_clients)}")
++            alt = VlaClient(url, give_up_ms=give_up, ctx=self.ctx)
++            if not alt.ping(5000):
++                raise RuntimeError(f"--vla-alt {name}={url} does not answer ping")
++            alt_info = alt.info()
++            alt.check_modality_config()
++            self.vla_clients[name] = (alt, alt_info)
++        # Operator control (HUD keys v/w/r/p): PULL bound now, polled once per tick at the boundary.
++        self.control = control.ControlPull(args.control, ctx=self.ctx) if args.control else None
++        self.cstate = control.ControlState()
++        self.control_log: list[dict] = []
++        self.reset_requested = self._resumed = False
++        self.n_ticks_total = self.n_pauses = self.n_operator_resets = self.n_vla_swaps = self.n_wbc_swaps = 0
++        self.paused_ms = 0.0
++        self.ep_wbc_swaps, self.ep_paused_ms = 0, 0.0
+ 
+         self.cfg = sp.SplicerConfig(arm=args.arm, s=args.s, B=args.B,
+                                     d_init=args.d_inj if self.vl else args.d_init,
+@@ -248,6 +278,11 @@
+             "env_checkers_skipped": self.n_env_checkers,
+             "render_context_teardown_patch": self.render_patch,
+             "malloc_trim_per_reset": not args.no_malloc_trim,
++            "control": {"url": self.control.url if self.control else None,
++                        "vla_targets": {n: c.url for n, (c, _) in self.vla_clients.items()},
++                        "vla_alt_info": {n: i for n, (c, i) in self.vla_clients.items() if c is not self.vla},
++                        "wbc_targets": {n: getattr(b, "url", "in-process") for n, b in self.wbc_targets.items()},
++                        "swap_wbc_every_s": args.swap_wbc_every},
+             "rss_mb_start": rss_mb(),
+         }
+         self.run = telemetry.RunDir(args.runs_root, tag, telemetry.collect_config(argv, extra))
+@@ -426,7 +461,7 @@
+         row["ep"] = self.ep
+         row["k"] = k
+         row["t_start_ns"] = t_start
+-        row["period_us"] = (t_start - prev_start) / 1e3 if k else 0.0
++        row["period_us"] = (t_start - prev_start) / 1e3 if k and prev_start else 0.0  # None: after a pause
+         row["late_us"] = late_ns / 1e3
+         row["slip"] = slip
+         row["sim_us"] = (t_sim_end - t_sim) / 1e3
+@@ -502,7 +537,99 @@
+         self.pub.meta({"processor": {"sim": "host-cpu", "vla": self.vla_info.get("backend", "policy-server"),
+                                      "wbc": self._wbc_info().get("backend")},
+                        "ep": self.ep, "k": k, "mode": self.mode,
+-                       "rt_factor": (k * TICK_NS / 1e9) / wall if wall else None})
++                       "rt_factor": (k * TICK_NS / 1e9) / wall if wall else None,
++                       "seed": self.seed,
++                       "endpoints": {"vla": self.vla.url, "wbc": getattr(self.runtime.primary, "url", "ort")},
++                       "current": {"vla": self.vla_name, "wbc": self.wbc_name},
++                       "targets": {"vla": list(self.vla_clients), "wbc": list(self.wbc_targets)},
++                       "pending_vla": self.cstate.pending_vla, "paused": self.cstate.paused,
++                       "control": self.control.url if self.control else None})
++
++    # --- operator control (PLAN.md §1.4.5; rtloop.control) ------------------------------------
++
++    def _control_boundary(self, k: int) -> bool:
++        """Between tick k and k+1 (after the TickLog commit and the PUB, so off the observation ->
++        actuation path): poll the control PULL once and apply what arrived. True: end the episode (reset)."""
++        self.n_ticks_total += 1
++        if self.control is None and not self.args.swap_wbc_every:
++            return False
++        cmds = self.control.poll() if self.control is not None else []
++        if control.auto_swap_due(self.n_ticks_total, self.args.swap_wbc_every):  # T-3.9
++            cmds.append(control.Command("swap_wbc", control.NEXT))
++        if not cmds:
++            return False
++        end = False
++        for c in cmds:
++            end |= self._apply_control(k, c)
++        if self.cstate.paused and not end:
++            end = self._pause(k)
++        if self.pub_on:
++            self._meta(k)  # the HUD's processor map follows a swap at once, not at the next 1 Hz meta
++        return end
++
++    def _apply_control(self, k: int, c) -> bool:
++        if isinstance(c, control.ControlError):
++            self.cstate = control.reject(self.cstate, c)
++            print(f"rt_sim: control: rejected: {c}", file=sys.stderr, flush=True)
++            return False
++        self.cstate, act = control.apply(self.cstate, c, list(self.vla_clients), self.vla_name,
++                                         list(self.wbc_targets), self.wbc_name)
++        self.control_log.append({"ep": self.ep, "k": k, "cmd": c.cmd, "to": c.to, "id": c.id,
++                                 "action": act.kind, "arg": act.to})
++        if act.kind == "swap_wbc":
++            self._swap_wbc(act.to)
++        elif act.kind == "reset":
++            self.reset_requested = True
++            return True
++        return False
++
++    def _swap_wbc(self, name: str) -> None:
++        """Stateless (D2): tick k+1's run_inference goes to the new backend; ORT shadows a remote one (D16)."""
++        be = self.wbc_targets[name]
++        if isinstance(be, self.wb.ZmqWbc):
++            be.latched, be.consecutive = False, 0  # its REQ is idle (calls are synchronous): no I/O here
++            self.runtime.shadow = None if self.args.no_shadow else self.ort
++        else:
++            self.runtime.shadow = None
++        self.runtime.primary = be
++        self.wbc_name = name
++        self.n_wbc_swaps += 1
++        self.ep_wbc_swaps += 1
++
++    def _swap_vla(self, name: str) -> None:
++        """Reset window only: the episode-end drain left nothing in flight, and the gen bump that follows
++        discards anything the old server could still send."""
++        assert not self.vla.in_flight, "VLA swap with a request in flight"
++        self.vla, self.vla_info = self.vla_clients[name]
++        self.vla_be = vla_backend_of(self.vla_info)
++        self.vla_name = name
++        self.st.d_hist.clear()  # d_hat describes the server, not the episode (splicer.reset)
++        self.n_vla_swaps += 1
++        self.cstate = control.vla_swapped(self.cstate)
++        print(f"rt_sim: VLA swapped to {name} ({self.vla.url}, {self.vla_info.get('backend')})", flush=True)
++
++    def _pause(self, k: int) -> bool:
++        """Operator pause between tick k and k+1: the sim is frozen (the passive viewer keeps rendering
++        in its own thread), commands are still served, meta is re-published every second. On resume the
++        pacer re-anchors so T_{k+1} = now + 20 ms (no slip, no catch-up burst). True: a reset ended it."""
++        t0 = t_meta = clock.now_ns()
++        self.n_pauses += 1
++        end = False
++        while self.cstate.paused and not self.stop_requested and not end:
++            time.sleep(0.02)
++            for c in self.control.poll():
++                end |= self._apply_control(k, c)
++            now = clock.now_ns()
++            if self.pub_on and now - t_meta >= 1_000_000_000:
++                self._meta(k)
++                t_meta = now
++        dt_ms = (clock.now_ns() - t0) / 1e6
++        self.paused_ms += dt_ms
++        self.ep_paused_ms += dt_ms
++        if self.rt:
++            self.pacer.anchor(clock.now_ns() - k * TICK_NS)
++        self._resumed = True
++        return end
+ 
+     # --- tick loops ---------------------------------------------------------------------------
+ 
+@@ -567,6 +694,10 @@
+             prev_start = t_start
+             if end is not None:
+                 return end, k, (k if success else None), stored
++            if self._control_boundary(k):  # operator reset (HUD r): end here, no outcome recorded
++                return None, k, None, stored
++            if self._resumed:  # tick k+1 after a pause has no meaningful period
++                self._resumed, prev_start = False, None
+             if self.stop_requested:
+                 return None, k, None, stored
+         raise AssertionError("unreachable: TRUNC ends the last tick")
+@@ -596,6 +727,10 @@
+             last_cmd = cmd
+             if end is not None:
+                 return end, k, (k if success else None), None
++            if self._control_boundary(k):
++                return None, k, None, None
++            if self._resumed:
++                self._resumed, prev_start = False, None
+             if self.stop_requested:
+                 return None, k, None, None
+         raise AssertionError("unreachable: TRUNC ends the last tick")
+@@ -614,6 +749,9 @@
+         wbc_ping = None
+         if isinstance(self.runtime.primary, self.wb.ZmqWbc):
+             wbc_ping = self.runtime.primary.reset_episode()
++        if self.cstate.pending_vla is not None:  # HUD v: applied here, where gen is bumped anyway
++            self._swap_vla(self.cstate.pending_vla)
++        self.ep_wbc_swaps, self.ep_paused_ms = 0, 0.0
+         self.gen += 1
+         sp.reset(self.st, self.gen)
+         self.ep, self.seed, self.ep_req_i = ep, seed, 0
+@@ -655,10 +793,15 @@
+             self.rlog.update(seq, first_row=first, last_row=last, n_rows_used=n)
+         for seq, jump in self.jumps.items():
+             self.rlog.update(seq, switch_jump=jump)
+-        if end is None:  # interrupted: not an outcome, so no EpisodeLog record
++        if end is None:  # interrupted or operator reset: not an outcome, so no EpisodeLog record
+             self.rlog.end_episode()
+             self.tlog.flush(sync=True)
+             self.tlog.release()
++            if self.reset_requested and not self.stop_requested:
++                self.reset_requested = False
++                self.n_operator_resets += 1
++                print(f"rt_sim: ep {ep} seed {seed}: operator reset at k={k_end}", flush=True)
++                return {"ep": ep, "seed": seed, "end": "OPERATOR_RESET", "k_end": k_end}
+             return None
+         t = self.tlog.rows()[row0:]
+         rec = self._episode_record(ep, seed, end, k_end, fst, drain, t, n_calls0, wbc_ping,
+@@ -685,8 +828,10 @@
+         return {
+             "ep": ep, "seed": seed, "mode": self.mode, "arm": None if self.sync else args.arm,
+             "d_inj": args.d_inj if self.vl else None, "s": args.s, "B": args.B, "crn": args.crn,
+-            "vla": args.vla, "vla_be": self.vla_be.name, "checkpoint": self.vla_info.get("backend"),
+-            "tree": self.vla_info.get("tree"), "wbc": args.wbc,
++            "vla": self.vla.url, "vla_be": self.vla_be.name, "checkpoint": self.vla_info.get("backend"),
++            "tree": self.vla_info.get("tree"), "wbc": getattr(primary, "url", "ort"),
++            "vla_target": self.vla_name, "wbc_target": self.wbc_name,
++            "n_wbc_swaps": self.ep_wbc_swaps, "paused_ms": self.ep_paused_ms,
+             "wbc_be": (WbcBackend.ORT.name if isinstance(primary, self.wb.OrtCpu) else primary.backend.name),
+             "ort_opts": args.ort_opts, "gen": self.gen,
+             "success": end == EpisodeEnd.SUCCESS, "first_success_tick": fst, "end": end.name,
+@@ -734,6 +879,10 @@
+             ("summary", self._summary),
+             ("ticklog", self.tlog.close), ("requestlog", self.rlog.close), ("episodelog", self.elog.close),
+             ("pub", self.pub.close), ("vla", self.vla.close),
++            ("control", lambda: self.control is not None and self.control.close()),
++            ("vla_alts", lambda: [c.close() for c, _ in self.vla_clients.values() if c is not self.vla]),
++            ("wbc_alts", lambda: [b.close() for b in self.wbc_targets.values()
++                                  if isinstance(b, self.wb.ZmqWbc) and b is not self.runtime.primary]),
+             ("wbc", lambda: isinstance(self.runtime.primary, self.wb.ZmqWbc) and self.runtime.primary.close()),
+             ("uninstall", self.wb.uninstall), ("env", self.env.close),
+             ("ctx", lambda: self.ctx.destroy(linger=0)),
+@@ -753,6 +902,11 @@
+         self.run.write_json("summary.json", {
+             "episodes": self.n_episodes, "interrupted": self.interrupted, "ticks": len(self.tlog),
+             "requests": self.next_seq - 1, "vla_stats": self.vla.stats, "wbc": wbc,
++            "control": {"applied": self.cstate.n_applied, "rejected": self.cstate.n_rejected,
++                        "last_error": self.cstate.last_error, "pauses": self.n_pauses,
++                        "paused_ms": self.paused_ms, "operator_resets": self.n_operator_resets,
++                        "vla_swaps": self.n_vla_swaps, "wbc_swaps": self.n_wbc_swaps,
++                        "log": self.control_log[-500:]},
+             "rss_mb_end": rss_mb(), "wall_s": time.monotonic() - self.t_run0})
+ 
+ 
+@@ -784,6 +938,14 @@
+     ap.add_argument("--viewer", action="store_true")
+     ap.add_argument("--pub", nargs="?", const=telemetry.TELEMETRY_PUB, default=None,
+                     help=f"telemetry PUB (default {telemetry.TELEMETRY_PUB})")
++    ap.add_argument("--control", nargs="?", const=control.CONTROL_PULL, default=None,
++                    help=f"operator control PULL for the HUD keys v/w/r/p (default {control.CONTROL_PULL})")
++    ap.add_argument("--vla-alt", default="", metavar="NAME=URL[,...]",
++                    help="VLA swap targets (HUD v; applied at the next reset)")
++    ap.add_argument("--wbc-alt", default="", metavar="NAME=URL[,...]",
++                    help="W-WBC swap targets besides 'ort' (HUD w; applied from the next tick)")
++    ap.add_argument("--swap-wbc-every", type=float, default=None, metavar="S",
++                    help="T-3.9: swap the WBC to the next target every S seconds of ticks")
+     ap.add_argument("--dump-obs516", action="store_true")
+     ap.add_argument("--dump-vla-obs", type=int, default=0, metavar="N")
+     ap.add_argument("--tag", default=None)

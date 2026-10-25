@@ -1,0 +1,23 @@
+# M2 primary comparison (T-2.7, PLAN.md §2 M2, §4.4): RT C4 (v1, s 16, B 0) with the VLA on TT server_g1 :5557
+# vs RT C4 with the VLA on the RT-owned GPU VLA :5565; DP1 checkpoint, GPU WBC :5556, common random numbers.
+# n = 50 paired (DP10), seeds 2000-2049; gross-drop gate only: lower 80% bound of (TT - GPU) >= -25 pts;
+# delta, 95% CI and exact McNemar p reported. One loop process (RT timing).
+# d_init (d_hat before the first measurement, loop.py --d-init): 3 on TT, 4 on the 5090 (splicer default).
+# The C4gpu arm has T-1.9's C4 settings (configs/eval_m1_primary.yaml: same args, seeds and WBC) but is NOT reused
+# from T-1.9: T-1.9's GPU VLA seeded its CUDA generator, so its noise for a noise_seed differs from server_g1's CPU
+# draw and its runs are not --crn paired with TT. Both arms run fresh in S1b, interleaved by seed blocks, against a GPU
+# VLA started with --noise cpu (jobs/t2_primary.sh refuses any other, and its T2_GPU_ARM_DIRS reuse path accepts only
+# GPU runs that drew --noise cpu). Run through jobs/t2_primary.sh (a session copy with the session's endpoints):
+#   simpy $RT/scripts/eval_paired.py --matrix $RT/configs/eval_m2_primary.yaml --out $CHIP_SESSION_DIR/m2_primary
+name: m2_primary
+seeds: "2000-2049"
+procs: 1
+block: 10
+max_ticks: 1440
+gross_drop: -0.25
+common_args: "--mode rt --arm v1 --s 16 --B 0 --wbc tcp://127.0.0.1:5556 --crn --max-ticks 1440"
+arms:
+  - {name: C4tt,  args: "--vla tcp://127.0.0.1:5557 --d-init 3"}
+  - {name: C4gpu, args: "--vla tcp://127.0.0.1:5565 --d-init 4"}
+compare:
+  - [C4tt, C4gpu]

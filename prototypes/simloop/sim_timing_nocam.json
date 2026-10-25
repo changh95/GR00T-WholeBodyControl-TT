@@ -1,0 +1,351 @@
+{
+ "mode": "nocam",
+ "make_env_s": 6.788380712008802,
+ "model_timestep": 0.002,
+ "control_timestep": 0.02,
+ "substeps_per_env_step": 10,
+ "camera_names": [
+  "robot0_oak_egoview",
+  "robot0_rs_tppview"
+ ],
+ "camera_hw": [
+  [
+   480,
+   640
+  ],
+  [
+   480,
+   640
+  ],
+  [
+   480,
+   640
+  ]
+ ],
+ "use_camera_obs": false,
+ "camera_observables(sampling_dt,enabled)": {},
+ "n_observables": 27,
+ "nq_nv_nu": [
+  57,
+  55,
+  43
+ ],
+ "ngeom_nbody": [
+  137,
+  58
+ ],
+ "action_space": {
+  "action.base_height_command": [
+   1
+  ],
+  "action.left_arm": [
+   7
+  ],
+  "action.left_hand": [
+   7
+  ],
+  "action.navigate_command": [
+   3
+  ],
+  "action.right_arm": [
+   7
+  ],
+  "action.right_hand": [
+   7
+  ],
+  "action.waist": [
+   3
+  ]
+ },
+ "reset1_s": 2.6438222259748727,
+ "mjsim_recreated_on_reset": true,
+ "obs_keys": {
+  "q": [
+   [
+    43
+   ],
+   "float64"
+  ],
+  "dq": [
+   [
+    43
+   ],
+   "float64"
+  ],
+  "ddq": [
+   [
+    43
+   ],
+   "float64"
+  ],
+  "tau_est": [
+   [
+    43
+   ],
+   "float64"
+  ],
+  "floating_base_pose": [
+   [
+    7
+   ],
+   "float64"
+  ],
+  "floating_base_vel": [
+   [
+    6
+   ],
+   "float64"
+  ],
+  "floating_base_acc": [
+   [
+    6
+   ],
+   "float64"
+  ],
+  "wrist_pose": [
+   [
+    14
+   ],
+   "float64"
+  ],
+  "state.left_arm": [
+   [
+    7
+   ],
+   "float64"
+  ],
+  "state.right_arm": [
+   [
+    7
+   ],
+   "float64"
+  ],
+  "state.waist": [
+   [
+    3
+   ],
+   "float64"
+  ],
+  "state.left_leg": [
+   [
+    6
+   ],
+   "float64"
+  ],
+  "state.right_leg": [
+   [
+    6
+   ],
+   "float64"
+  ],
+  "state.left_hand": [
+   [
+    7
+   ],
+   "float64"
+  ],
+  "state.right_hand": [
+   [
+    7
+   ],
+   "float64"
+  ],
+  "ego_view_image": [
+   [
+    480,
+    640,
+    3
+   ],
+   "uint8"
+  ],
+  "video.ego_view": [
+   [
+    480,
+    640,
+    3
+   ],
+   "uint8"
+  ],
+  "tpp_view_image": [
+   [
+    480,
+    640,
+    3
+   ],
+   "uint8"
+  ],
+  "video.tpp_view": [
+   [
+    480,
+    640,
+    3
+   ],
+   "uint8"
+  ],
+  "torso_quat": [
+   [
+    4
+   ],
+   "float32"
+  ],
+  "torso_ang_vel": [
+   [
+    3
+   ],
+   "float32"
+  ]
+ },
+ "language": "pick up the apple, walk left and place the apple on the plate.",
+ "loop_wall_s": 2.286493250983767,
+ "sim_time_s": 10.0,
+ "realtime_factor": 4.373509519740539,
+ "max|obs.joint_pos - qpos_end_of_step| (rad)": [
+  0.0,
+  0.0
+ ],
+ "walk_policy_ticks": 0,
+ "pelvis_height_end": 0.7518808709953355,
+ "reset2_s": 2.46455295899068,
+ "timing": {
+  "mjsim.forward(substep)": {
+   "n": 6,
+   "mean_ms": 0.194,
+   "p50": 0.207,
+   "p99": 0.218,
+   "max": 0.218
+  },
+  "robosuite._update_observables(per substep)": {
+   "n": 4992,
+   "mean_ms": 0.015,
+   "p50": 0.006,
+   "p99": 0.102,
+   "max": 0.17
+  },
+  "robosuite._get_observations": {
+   "n": 492,
+   "mean_ms": 0.024,
+   "p50": 0.024,
+   "p99": 0.028,
+   "max": 0.118
+  },
+  "Gr00tLocomanip.get_basic_observation(img flip/copy)": {
+   "n": 492,
+   "mean_ms": 0.032,
+   "p50": 0.031,
+   "p99": 0.036,
+   "max": 0.082
+  },
+  "Gr00tLocomanip.get_gr00t_observation": {
+   "n": 492,
+   "mean_ms": 0.158,
+   "p50": 0.157,
+   "p99": 0.165,
+   "max": 0.18
+  },
+  "SyncEnv.observe(joint reorder+FK eef)": {
+   "n": 992,
+   "mean_ms": 0.181,
+   "p50": 0.181,
+   "p99": 0.195,
+   "max": 0.31
+  },
+  "WBC.set_goal": {
+   "n": 490,
+   "mean_ms": 0.009,
+   "p50": 0.009,
+   "p99": 0.012,
+   "max": 0.013
+  },
+  "pinocchio.cache_forward_kinematics": {
+   "n": 490,
+   "mean_ms": 0.005,
+   "p50": 0.005,
+   "p99": 0.007,
+   "max": 0.01
+  },
+  "WBC.MLP Balance (ort)": {
+   "n": 490,
+   "mean_ms": 0.061,
+   "p50": 0.061,
+   "p99": 0.069,
+   "max": 0.073
+  },
+  "WBC.lower.get_action(MLP+scale)": {
+   "n": 490,
+   "mean_ms": 0.083,
+   "p50": 0.082,
+   "p99": 0.091,
+   "max": 0.094
+  },
+  "WBC.decoupled.get_action(total)": {
+   "n": 490,
+   "mean_ms": 0.115,
+   "p50": 0.114,
+   "p99": 0.125,
+   "max": 0.126
+  },
+  "G1SyncEnv.safety_monitor": {
+   "n": 490,
+   "mean_ms": 0.016,
+   "p50": 0.016,
+   "p99": 0.02,
+   "max": 0.025
+  },
+  "mjsim.step1(physics substep)": {
+   "n": 4990,
+   "mean_ms": 0.085,
+   "p50": 0.082,
+   "p99": 0.104,
+   "max": 0.241
+  },
+  "robosuite._pre_action(PD/controller)": {
+   "n": 4990,
+   "mean_ms": 0.195,
+   "p50": 0.177,
+   "p99": 0.351,
+   "max": 0.481
+  },
+  "mjsim.step2(physics substep)": {
+   "n": 4990,
+   "mean_ms": 0.047,
+   "p50": 0.044,
+   "p99": 0.107,
+   "max": 0.242
+  },
+  "robosuite._post_action(reward/success)": {
+   "n": 490,
+   "mean_ms": 0.034,
+   "p50": 0.033,
+   "p99": 0.04,
+   "max": 0.059
+  },
+  "robosuite.env.step(total, 10 substeps+obs)": {
+   "n": 490,
+   "mean_ms": 3.488,
+   "p50": 3.461,
+   "p99": 3.916,
+   "max": 3.959
+  },
+  "SyncEnv.step(total)": {
+   "n": 490,
+   "mean_ms": 4.133,
+   "p50": 4.104,
+   "p99": 4.565,
+   "max": 4.603
+  },
+  "WBC.set_observation(obs+history)": {
+   "n": 490,
+   "mean_ms": 0.196,
+   "p50": 0.195,
+   "p99": 0.206,
+   "max": 0.22
+  },
+  "WholeBodyControlWrapper.step(total tick)": {
+   "n": 490,
+   "mean_ms": 4.48,
+   "p50": 4.449,
+   "p99": 4.916,
+   "max": 4.954
+  }
+ }
+}

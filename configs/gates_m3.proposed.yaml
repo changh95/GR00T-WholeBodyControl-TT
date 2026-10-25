@@ -1,0 +1,77 @@
+# SUPERSEDED (2026-10-25, verify:all D1): these sets are merged into $RT/gates.yaml (m3_sim, m3_rt, m3_rt_slow), which
+# adds the rows this file lacks (starved_frac_max, starved_run_max, vla_errors_max, wbc_x280_frac_min,
+# x280_heartbeat_continuity_min) and explains each departure in a comment. Do not gate with this file and do not copy
+# it into a session: jobs/m3_eval.sh copies gates.yaml's sets (x280/tools/m3_jobs.py m3-gates). Kept as the record of
+# what was proposed.
+#
+# Proposed M3 gate sets (PLAN.md §4.2 `m3_sim`, `m3_rt`, `m3_rt_slow`; T-3.3, T-3.7, DP11), for gates.yaml once M1 is
+# done (gates.yaml is M1-owned). Until then:
+#   simpy $RT/scripts/analyze_run.py RUN --gates m3_sim --gates-file $RT/configs/gates_m3.proposed.yaml
+# Every key below is one scripts/analyze_run.py GATE_KEYS knows (an unknown key exits 2).
+#
+# Rows of PLAN §4.2 / T-3.x that analyze_run has no key for yet (requested change; the jobs check them from
+# verdict.json's metrics or from x280d's own logs until then):
+#   starved_frac_max: 0.001        -> metric starved_frac (computed already)            m3_rt, m3_rt_slow ("as m2")
+#   starved_run_max: 10            -> metric starved_run_max (computed already)         m3_rt, m3_rt_slow
+#   wbc_x280_frac_min: 0.999       -> new: share of ticks with wbc_be in {X280, X280_SIM} (wbc_backend_counts has it);
+#                                     without it a run that never reached x280d (or fell back silently) can pass
+#   x280_heartbeat_continuity_min: 1.0 -> new: from x280d's ring (CHIP_SESSION_DIR/x280d_ticks.npy, status 3 = stall)
+#                                     or its status log; T-3.7 "heartbeat continuity 100%"
+#   shadow_da_p999_max: 1.0e-2     -> new: p99.9 of shadow_da (T-3.6 is a p99.9 bound; only p99 exists today)
+#   wbc_visible_wait_p99_ms: 2.0   -> new: m3_rt_slow with early dispatch (WP-3.8b) gates the *visible* wait, i.e. the
+#                                     RTT of ticks with wbc_early = 1 measured from the collect, not the dispatch
+#
+# m3_sim = the m1_sim_smoke rows + WBC RTT p99 <= 2 ms + fallbacks 0 (T-3.3), plus overrun_frac_max from §4.2's m3_sim
+# row. Left out on purpose: §4.2's d p99 <= 3 (that row assumes the TT VLA, d = 3; T-3.3 runs the 60 +- 5 ms mock, d = 4)
+# and the viewer rows (T-3.3 runs headless; the viewer rows have no data without --viewer and would fail "no data").
+m3_sim:
+  period_p99_ms: 21.0
+  period_max_ms: 30.0
+  overrun_frac_max: 0.005      # compute > 20 ms
+  slips_max: 0
+  wbc_rtt_p99_ms: 2.0
+  wbc_fallback_frac_max: 0.0
+  inflight_max: 1
+  starved_ticks_max: 0
+  safety_faults_max: 0
+
+# m3_rt (T-3.7) = §4.2's m3_rt row on the T-1.4 timing rows of m2_rt: d p99 <= 3 (TT VLA), fallbacks 0, TT error-free.
+# vla_p50_ms_max is the M2 projection (1.1 x 45 ms); T-3.7 asks TT p50 within +-5% of T-2.3, so jobs/m3_eval.sh
+# re-derives it from the session's T-2.3 bench when one is given (M3_T23_BENCH). shadow_da_p99_max is the fp16 bound
+# (T-3.6, DP4 default); with DP4 fp32 (one policy per tile) use 5.0e-5. wbc_rtt_p50_ms is not gated (§4.2 has p99 only).
+m3_rt:
+  period_p99_ms: 21.0
+  period_max_ms: 30.0
+  overrun_frac_max: 0.005
+  slips_max: 0
+  viewer_k0_ms_max: 3.0
+  viewer_p99_ms_max: 3.0
+  wbc_rtt_p99_ms: 2.0
+  wbc_rtt_over20_frac_max: 0.001
+  wbc_fallback_frac_max: 0.0
+  shadow_da_p99_max: 1.0e-2
+  d_p99_max: 3
+  inflight_max: 1
+  safety_faults_max: 0
+  vla_timeouts_max: 0
+  vla_p50_ms_max: 49.5
+
+# m3_rt_slow (DP11, accepted by the user): as m3_rt, but WBC RTT p99 <= 9 ms (the run needs --wbc-timeout-ms 12 and
+# x280d serve --slow, §1.4.4 step 4). The early-dispatch alternative (visible wait p99 <= 2 ms) needs the
+# wbc_visible_wait_p99_ms key above. Above 8 ms compute the X280 stays shadow only (DP11), so no gate set covers it.
+m3_rt_slow:
+  period_p99_ms: 21.0
+  period_max_ms: 30.0
+  overrun_frac_max: 0.005
+  slips_max: 0
+  viewer_k0_ms_max: 3.0
+  viewer_p99_ms_max: 3.0
+  wbc_rtt_p99_ms: 9.0
+  wbc_rtt_over20_frac_max: 0.001
+  wbc_fallback_frac_max: 0.0
+  shadow_da_p99_max: 1.0e-2
+  d_p99_max: 3
+  inflight_max: 1
+  safety_faults_max: 0
+  vla_timeouts_max: 0
+  vla_p50_ms_max: 49.5

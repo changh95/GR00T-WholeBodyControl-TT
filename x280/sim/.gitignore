@@ -1,0 +1,3 @@
+# Sources, build trees and the install prefix produced by build_spike.sh (SHAS.txt is the tracked record).
+build/
+spike-install/

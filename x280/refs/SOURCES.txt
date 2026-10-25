@@ -1,0 +1,6 @@
+# Reference copies for x280/regs.py citations (read-only data, never compiled or imported).
+# file | upstream URL | sha256
+linux-v6.8-sifive_ccache.c | https://raw.githubusercontent.com/torvalds/linux/v6.8/drivers/cache/sifive_ccache.c | 8d0e4d7aaf26d3e3e357143300254b5af683bbf3199b9d9b62f9d575886e744c
+freedom-e-sdk-4518a22-unmatched-metal-platform.h | https://raw.githubusercontent.com/sifive/freedom-e-sdk/4518a22c213d7fec6e23e20d24a2ba646014f6dd/bsp/sifive-hifive-unmatched/metal-platform.h | d07463b9ceca29dcea0c0821f2c4d280b8eed0c715d949b72c7a37c0fe8a946e
+freedom-metal-fa026d2-sifive_ccache0.h | https://github.com/sifive/freedom-metal/blob/fa026d2ee08e5ba49e8ae703fb4cbcbb710a6a69/metal/drivers/sifive_ccache0.h | db324dcd5a9c5ff3df9d830edfe6caa2786a24a3138e10182c3c850a9bf4239e
+freedom-metal-fa026d2-sifive_ccache0.c | https://github.com/sifive/freedom-metal/blob/fa026d2ee08e5ba49e8ae703fb4cbcbb710a6a69/src/drivers/sifive_ccache0.c | 6a0d26be81a995d7c266926ebf37427ed0bf1fde016a4f3ab42bed553e86fb8a

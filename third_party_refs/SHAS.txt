@@ -1,0 +1,8 @@
+fw-19.12.0 fe27c0e86af840760d057442bda841490b2673af
+luwen ecef1a802de5198eb123510497ec08e1ce822b2e
+SHAS.txt (no git)
+tt-bh-linux 9f9597db53b27bbafe033e1158f259a020f8e5fc
+tt-isa-documentation 0610df677e01a7ad8eb3581b68daab996cdd1f07
+tt-kmd c3befe6dd718e10f69d66666b0bafde1abdff0b1
+tt-kmd-2.11.0 c05f22460985960905928cf48b3fbde602d9ea37
+tt-system-firmware d12c8373d6e24e53a1d550538197be847745a4cd

@@ -1,0 +1,38 @@
+# M1 screen (T-1.8, PLAN.md §4.4 "M1 screen" VL cells): 12 VL cells x 50 paired episodes (DP10), screen seeds
+# 1000-1049. VL always runs --wbc ort, so 4 loop processes can share the one RT-owned GPU VLA on :5565.
+# Gate (T-1.8): lower 80% bound of (C4 at d_inj 4 - C1) >= -25 pts; falls(C4d4) <= falls(C1) + 2 is reported.
+# Everything else is the d-sweep and the ablations, reported only. The screen's two RT cells (RT C2, RT C4)
+# need the GPU WBC and one process: run them as a separate RT matrix.
+#   simpy $RT/scripts/eval_paired.py --matrix $RT/configs/eval_m1_screen.yaml --out $RT/runs/m1_screen
+name: m1_screen
+seeds: "1000-1049"
+procs: 4
+block: 10
+max_ticks: 1440
+gross_drop: -0.25
+common_args: "--vla tcp://127.0.0.1:5565 --wbc ort --crn --max-ticks 1440"
+arms:
+  - {name: C1,    args: "--mode sync"}
+  - {name: C2d4,  args: "--mode vl --arm sync_pause --d-inj 4"}
+  - {name: C3d8,  args: "--mode vl --arm async_noskip --s 16 --B 0 --d-inj 8"}
+  - {name: C3d12, args: "--mode vl --arm async_noskip --s 16 --B 0 --d-inj 12"}
+  - {name: C4d0,  args: "--mode vl --arm v1 --s 16 --B 0 --d-inj 0"}
+  - {name: C4d3,  args: "--mode vl --arm v1 --s 16 --B 0 --d-inj 3"}
+  - {name: C4d4,  args: "--mode vl --arm v1 --s 16 --B 0 --d-inj 4"}
+  - {name: C4d5,  args: "--mode vl --arm v1 --s 16 --B 0 --d-inj 5"}
+  - {name: C4d8,  args: "--mode vl --arm v1 --s 16 --B 0 --d-inj 8"}
+  - {name: C4d12, args: "--mode vl --arm v1 --s 16 --B 0 --d-inj 12"}
+  - {name: C5d4,  args: "--mode vl --arm v1 --s 16 --B 5 --d-inj 4"}
+  - {name: C6d4,  args: "--mode vl --arm sync_aligned --d-inj 4"}
+compare:
+  - [C4d4, C1]                                   # the T-1.8 gate
+  - {new: C4d0,  ref: C1,    gate: false}        # d-sweep: C4@d - C1
+  - {new: C4d3,  ref: C1,    gate: false}
+  - {new: C4d5,  ref: C1,    gate: false}
+  - {new: C4d8,  ref: C1,    gate: false}
+  - {new: C4d12, ref: C1,    gate: false}
+  - {new: C2d4,  ref: C1,    gate: false}
+  - {new: C4d8,  ref: C3d8,  gate: false}        # latency compensation (C4 vs C3 at d 8, 12)
+  - {new: C4d12, ref: C3d12, gate: false}
+  - {new: C5d4,  ref: C4d4,  gate: false}        # blend ablation
+  - {new: C6d4,  ref: C4d4,  gate: false}        # sync-aligned ablation

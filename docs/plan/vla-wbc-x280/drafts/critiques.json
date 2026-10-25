@@ -1,0 +1,426 @@
+[
+ {
+  "critic": "control",
+  "issues": [
+   {
+    "severity": "major",
+    "section": "§2 M1 T-1.5 (negative control); R1; D11/D15",
+    "problem": "The negative control cannot show head-of-line blocking. Two separate causes: (1) only the WBC is pointed at :5555, while the VLA stays on the dedicated :5565, so :5555 serves no VLA calls; (2) the WbcClient's 5 ms RCVTIMEO with ORT fallback caps the measured RTT near 5 ms and switches to ORT for the rest of the episode after 3 timeouts, so 'WBC RTT > 20 ms' can never be observed.",
+    "evidence": "T-1.5 is defined as 'as T-1.4 with --wbc tcp://127.0.0.1:5555'. T-1.4 uses VLA_GPU=:5565 (§2 env.sh, D11). HOL blocking needs a VLA handler running on the same REP loop (server_client.py:117-143; U:srv 'Q1 measured head-of-line blocking'). The WP-1.4 rule is 'RCVTIMEO 5 ms; one timeout -> ORT; 3 in a row -> ORT for the rest of the episode'. Draft A's version worked only because A's M1 VLA was on :5555 (drafts/plan-A.md:12, 326). The merge moved the VLA to :5565 and broke it.",
+    "fix": "Run T-1.5 with `--vla tcp://127.0.0.1:5555 --wbc tcp://127.0.0.1:5555 --wbc-timeout-ms 200 --wbc-no-latch` (timing only; cloudwalk checkpoint, 2 episodes). Gate on '>= 3% of WBC calls with RTT > 20 ms OR timeouts'. Also assert that the T-1.4 run (separate :5556) shows < 0.1%."
+   },
+   {
+    "severity": "major",
+    "section": "§1.2 steps 2-4; §1.6 VL; T-1.2; screen cells C1@0/C4@0",
+    "problem": "VL mode cannot deliver d_inj = 0 in the specified tick order. The VL visibility check and block sit in step 2 (poll), but the request is only sent in step 3 (trigger) of the same tick. A chunk with k_obs = k therefore becomes visible at tick k+1 at the earliest, so the effective d is 1 and row 1 is executed. T-1.2 ('VL v1 s=20 d_inj=0 equals sync, max|Δq| = 0') then fails, or passes only through an undocumented special case.",
+    "evidence": "§1.2 step 2: 'In VL mode the record stays invisible until k_obs + d_inj; the loop blocks at that tick if it has not arrived'. Step 3 sends the request; step 4 selects. In the §3.1 select(), the pending chunk is swapped in only if pending.k_arr <= k, and that record is registered in step 2. In sync (MultiStepWrapper), row 0 of the chunk computed from o_20 is applied at tick 20 (multistep_wrapper.py:256-263).",
+    "fix": "In VL mode, move the 'make visible / block until arrived' check to just before select (between steps 3 and 4), so that at d_inj = 0 the loop blocks on the reply sent in step 3 of the same tick. Define VL 'in flight' as 'not yet visible', so triggers do not depend on reply timing. Add T-1.1 cases asserting that the row executed at k_obs + d_inj equals d_inj for d_inj in {0, 1, 3}. State that in RT mode d >= 1 by construction."
+   },
+   {
+    "severity": "major",
+    "section": "§2 T-1.1–T-1.3; R13; WP-1.3 mock",
+    "problem": "No end-to-end test checks chunk alignment at d > 0. T-1.2 and T-1.3 run at d = 0, where the latency skip does nothing. T-1.1 tests only the pure splicer functions. Nothing checks that the observation sent is o_{k_obs}, or that row d is applied at k_obs + d in the running loop. The server anchors the relative arm rows to whatever state is in the request, so an off-by-one in k_obs stamping (an observation from after step k, or k_obs = k+1) would shift every chunk by one tick. No test would fail; only the noisy n=50 SP-1 statistics might hint at it.",
+    "evidence": "Relative arms become absolute against the request's state: reference_state = s[-1] (state_action_processor.py:461-486), each row added to the same reference (action_chunking.py:340-355). detfn is 'a deterministic function of the obs' (WP-1.3), not of the tick. The RequestLog (§4.1) does not store the state that was sent.",
+    "fix": "Add T-1.2b with a mock 'ramp' mode: arm rows = request state.left_arm/right_arm + i·δ, nav row i = f(i). Run VL at d_inj in {1, 3, 8} and RT with the mock at 60 ± 5 ms, 2 episodes each. From ticks.npz, assert bit-exactly (f32) that cmd_arm(k) == state_sent(k_obs) + (k − k_obs)·δ, that state_sent equals the measured q at the end of step k_obs − 1, and that k − k_obs at the switch tick equals the logged d. Store state43_sent f32[43] in the RequestLog. This test, not 'C3 >= C4', is the alignment detector."
+   },
+   {
+    "severity": "major",
+    "section": "§1.2 episode lifecycle; T-1.4 (Slips = 0, max <= 30 ms, viewer.sync gate); R9; WP-1.5",
+    "problem": "The onscreen viewer is destroyed on every reset and relaunched inside the first env.step after reset. That step is tick 0, which runs after t0 is anchored. Window creation and scene upload therefore land in the paced loop on every episode, giving an overrun or slip at k = 0 and failing T-1.4's 'Slips = 0, max <= 30 ms', which is measured with the viewer on. Separately, the viewer requires onscreen=True, which deviates from the stock env, but §1.1 does not list this deviation.",
+    "evidence": "robosuite base.py:270-272 ('always terminate mjviewer'). _reset_internal only rebuilds the renderer object (base.py:319-335). step() calls viewer.update() (base.py:478-484), which calls launch_passive (mjviewer_renderer.py:26-33). Stock env: onscreen=False (rollout_policy.py:104-109). live_viewer: onscreen=True (live_viewer.py:100-108). WP-1.5 says 'the env exactly as rollout_policy builds it' plus the onscreen viewer.",
+    "fix": "In the reset window, before the pre-roll and before anchoring t0, call the env renderer's update() once (launch plus sync, no physics) through the existing patch_viewer_camera hook, and assert the viewer handle exists before anchoring. Keep tick 0 inside the gates and log viewer_us at k = 0. Add onscreen=True to the §1.1 deviation list. Extend T-1.7 with a frame-identity check between viewer on and viewer off."
+   },
+   {
+    "severity": "major",
+    "section": "§4.4 evaluation protocol; T-1.9; DP10; inconclusive rule",
+    "problem": "The confirm protocol cannot reliably clear a correct loop, and it can resolve only large effects. M1 exit is therefore likely to be blocked by noise. T-1.9 is also internally inconsistent: it needs a C2 arm that is not in the confirm matrix, it uses an unpaired, success-conditioned Mann–Whitney test, it does not name which of the three C4 cells is primary, and the second look is taken with no alpha spending.",
+    "evidence": "My simulation (paired Bernoulli, scene p ~ Beta(2,2) giving discordance 0.40, one-sided Wald 95%, margin −10): at n = 250 a single comparison passes with probability 0.81 at true Δ = 0 and 0.35 at Δ = −5 pts. If all three confirm cells (RT C4, VL C4@3, VL C4@5, each against the shared C1) must pass: 0.63 at Δ = 0 (0.74 with the +100 rule) and 0.13 at Δ = −5. The +100 look raises the one-sided α from 0.05 to about 0.064. The paired MDE (80% power) is 27 pts at n = 50 and 12 pts at n = 250. The research expects a small real drop for async (U:as risks). The §4.4 confirm matrix is 'RT: C1, C4; VL: C4@{3,5}', with no C2, yet T-1.9 requires 'C4 time-to-success <= C2's at VL d >= 5'. Stock noise is unseeded (gr00t_n1d6.py:310-314), so arms are maximally discordant.",
+    "fix": "Make the M1 exit functional (T-1.2, T-1.2b, T-1.3, T-1.4, T-1.10) and report success deltas as measured effects with CIs plus a VL d-sweep curve. If a statistical gate is kept: name one primary comparison (RT C4 vs C1); pre-register n = 350 with one look, or use a Pocock split (α = 0.0294 per look); add C2@5 at n = 250 if the time claim stays; analyse time-to-success as paired censored data (failures censored at 1440; seed-stratified log-rank, or paired restricted-mean difference). Reduce variance with common random numbers: an RT-owned GPU VLA wrapper on :5565 (srvpy importing Gr00tPolicy, Gr00tSimPolicyWrapper and PolicyServer, no repo edit) that calls torch.cuda.manual_seed(hash(ep_seed, seq)) before each call. That is still fresh noise per call, so the policy distribution is unchanged. Measure the discordance it removes on the screen. The same wrapper can return t_recv/t_reply in INFO, which is {} today (gr00t_policy.py:358)."
+   },
+   {
+    "severity": "major",
+    "section": "§3.4 DP-S rule; SP-1",
+    "problem": "The week-1 decision rule is dominated by noise. With 50 pairs, the bands of C4 − C1 are about one SD wide. The 'C3 >= C4 → stop and debug alignment' trigger fires about half the time even when alignment is correct, because at d_inj = 3 the latency skip changes the executed rows by only 3 ticks.",
+    "evidence": "Simulation, n = 50 paired, discordance 0.45 (SD of the difference ≈ 9.5 pts). If C3 and C4 are truly equal: P(C3 >= C4) = 0.55. If C4 is truly 5 pts better: 0.34. At true C4 − C1 = −10: v1 54%, sweeps 34%, stop 12%. At Δ = 0, sweeps are triggered 11% of the time.",
+    "fix": "Drop 'C3 >= C4' as a stop trigger, since T-1.2b checks alignment deterministically. Compare C3 with C4 only at d_inj in {8, 12}, where a gap is expected, and require one-sided p < 0.05. Express the DP-S bands as CI bounds (for example, the lower 80% bound of C4 − C1 > −20). State that 50 pairs detect only changes of about 27 pts or more."
+   },
+   {
+    "severity": "minor",
+    "section": "§1.6 VL sweep; T-1.8; SP-1",
+    "problem": "d_inj = 3 is used as the 5090 condition, but RT on the 5090 will run at d = 4 at p50. The 3-tick condition matches the expected TT latency instead.",
+    "evidence": "Paced GPU VLA latency is 65.2–68.4 ms p50 (U:srv measurements). Replies are polled only at tick start and the request leaves about 0.3 ms after T_k, so d = ceil(65.5/20) = 4. T-1.4 itself allows d p50 in {3, 4}. TT is about 45 ms, which gives d = 3.",
+    "fix": "Add d_inj = 4 to the sweep and use it in the T-1.8 screen and SP-1 gates. Keep d_inj = 3 as the TT condition."
+   },
+   {
+    "severity": "minor",
+    "section": "§3.1 select() pseudo-code",
+    "problem": "The blend source is the stored old chunk row, not the command that was actually executed. After starvation (nav ramped to 0, arms held) or after a late arrival, a B > 0 blend uses old row min(k − k_obs_old, 29), which still carries the original pre-ramp nav. It re-injects a non-zero walking command for B ticks.",
+    "evidence": "In select(): io = min(k - st.blend_from.k_obs, 29) and cmd[BLEND] = (1-w)*st.blend_from.rows[io][BLEND] + w*cmd[BLEND]. The starve() and hold() paths do not set st.last_row.",
+    "fix": "Blend from st.last_row, the last executed 35-vector, and update it in starve() and hold() as well. Add a unit test 'starve then arrival with B = 5': during the blend, nav must equal (1−w)·0 + w·new."
+   },
+   {
+    "severity": "minor",
+    "section": "§1.2 step 7 and lifecycle step 5 vs §3.1 Fault; T-1.6",
+    "problem": "FAULT has contradictory semantics. §1.2 ends the episode on FAULT. §3.1 says that after 50 starved ticks the episode 'keeps holding'. T-1.6 expects 'recovery on the next arrival'. The choice changes success accounting, because a starved episode that recovers can still succeed.",
+    "evidence": "§1.2: 'End the episode at the first success tick, at 1440 ticks, or on FALL or FAULT'. §3.1: 'flagged FAULT: it keeps holding'.",
+    "fix": "Use two codes: STARVE_FAULT (flag, continue, counted as loop-attributable) and SAFETY_FAULT (SystemExit, end the episode). State how each is scored in the statistics."
+   },
+   {
+    "severity": "minor",
+    "section": "WP-1.0 preflight; WP-1.5 guard; T-1.7; U5",
+    "problem": "The CUDA guard is vacuous. With CUDA_VISIBLE_DEVICES='', torch.cuda.is_initialized() is always False, and it cannot see a context created by another library or by code that resets the variable. The environment variable is the real guard.",
+    "evidence": "The client venv has torch 2.7.1+cu128 and the nvidia_* CUDA wheels (checked). The plan's checks are torch.cuda.is_initialized()==False after build, after each reset and at exit.",
+    "fix": "Assert os.environ['CUDA_VISIBLE_DEVICES'] == '' after all imports and after each reset. At exit, assert that rt_sim's pid is absent from `nvidia-smi --query-compute-apps=pid` (EGL contexts are type G, not C) and that libcuda.so has no context. Keep the frame-identity test."
+   },
+   {
+    "severity": "minor",
+    "section": "§1.1 process table (CPU pin 2); §4.4 controls; D4",
+    "problem": "Pinning the whole rt_sim process to CPU 2 puts the passive-viewer render thread, the ZMQ I/O thread and the NVIDIA EGL driver threads on the tick thread's CPU. CPU 2's SMT sibling, CPU 18, is not reserved. D4's 'no threads on the tick path' does not hold in CPU terms.",
+    "evidence": "mujoco.viewer.launch_passive runs its own render thread (mjviewer_renderer.py:28). lscpu shows CPUs 2 and 18 on core 2. The table pins rt_sim to '2'.",
+    "fix": "Pin only the tick thread to CPU 2. Give the process {2, 3}, with the viewer, ZMQ (ZMQ_THREAD_AFFINITY_CPU_ADD) and EGL threads on 3. Keep CPU 18 idle. Record the affinity in config.json."
+   },
+   {
+    "severity": "minor",
+    "section": "§3.1 Timeouts, s_eff, d̂",
+    "problem": "(a) A reply with d >= 26 is late-rejected anyway, yet the client waits the full 1000 ms (50 ticks) before giving up and retriggering. That makes starvation longer than needed. (b) clamp(16, lo=d̂, hi=30−d̂−2) is ill-defined when d̂ > 14 (lo > hi). With d̂ = max of the last 10, a single 380 ms TT outlier (d = 19) shrinks s_eff to 9 for about 10 requests, doubling VLA duty.",
+    "evidence": "§3.1 rows Trigger, s_eff, d̂, On arrival and Timeouts. LIBERO TT max latency is 380 ms (R21).",
+    "fix": "Give up at about (26 − 1) × 20 ms ≈ 500 ms, then lazy-pirate and retrigger. Define s_eff = max(1, min(s_cfg, 30 − d̂ − m)); single-in-flight already enforces s >= d. Use p90 of the last 10 as d̂, or bound the effect of one outlier, and log it."
+   },
+   {
+    "severity": "minor",
+    "section": "§1.2 episode lifecycle; WP-1.3",
+    "problem": "A VLA request can still be in flight at episode end. The REQ socket cannot send the blocking pre-roll request while a reply is outstanding (EFSM), and the plan specifies only a gen drop.",
+    "evidence": "REQ semantics require send/recv alternation. server_client.py:176-177 shows a single REQ socket per client.",
+    "fix": "At episode end, recv with a timeout of up to 1000 ms inside the reset window and discard the reply by gen, or close and re-create the socket. Count these events in T-1.10."
+   },
+   {
+    "severity": "minor",
+    "section": "T-1.3 official equivalence",
+    "problem": "Bit equality (max|Δq| = 0) is exposed to three avoidable confounders: (a) rt_sim's OrtCpu uses intra_op_num_threads=1, while the official path uses default SessionOptions; (b) the class-level D5 patch is process-wide and leaks into the official arm if both arms run in one pytest process; (c) if GR00T_WBC_SERVER is exported, the modified hook routes the official arm's WBC to the GPU.",
+    "evidence": "g1_gear_wbc_policy.py:58 (ort.InferenceSession with default options) and :60-66 (GR00T_WBC_SERVER hook). W has this file modified (git status M).",
+    "fix": "Run each arm in its own subprocess. Assert GR00T_WBC_SERVER is unset in simpy and in preflight. If Δq ≠ 0, rerun first with identical SessionOptions."
+   },
+   {
+    "severity": "minor",
+    "section": "§4.1 logs; config.json",
+    "problem": "Some logs needed to audit control correctness are missing. (a) The state actually sent to the VLA is not logged, so the relative-to-absolute anchoring cannot be audited. (b) Measured arm |dq| is not logged, although the safety trip is on measured dq > 6 rad/s. (c) It is unclear whether q43 is measured or commanded. (d) The ring is flushed only between episodes, so a crashing episode is lost. (e) Git SHAs do not identify the code under test, because R has untracked gear_wbc_policy.py and modified run_gr00t_server.py, and W has a modified g1_gear_wbc_policy.py.",
+    "evidence": "joint_safety.py:206-226 checks obs['dq']. git status in R shows '?? gr00t/policy/gear_wbc_policy.py' and 'M gr00t/eval/run_gr00t_server.py'; in W, 'M .../g1_gear_wbc_policy.py'. D10/WP-1.4 describe the server as 'stock … unmodified'.",
+    "fix": "RequestLog: add state43_sent f32[43] and obs_sha1. TickLog: add q43_meas, q43_cmd and dq_arm_absmax. Back the ring with np.memmap. config.json: record `git status --porcelain` and sha256 of each imported dirty or untracked file, or vendor gear_wbc_policy.py into RT with its hash."
+   },
+   {
+    "severity": "minor",
+    "section": "R13; §6.3(a)",
+    "problem": "The claim that T-1.3 'settles the a[0] ↔ t_obs alignment' overreaches. T-1.3 proves that rt_sim reproduces MultiStepWrapper's convention, not that the model was trained with row 0 meaning the command at t_obs.",
+    "evidence": "U:sim gaps: 'alignment … inferred from delta_indices, not empirically checked'; the dataset fps is not verified locally.",
+    "fix": "Rephrase the closure as 'loop equals the official convention'. If the question matters, settle it offline once the dataset is available (does predicted relative row 0 match q_t or q_{t+1}?) or with a VL ±1 index-offset ablation."
+   },
+   {
+    "severity": "minor",
+    "section": "§4.4 matrices; VL mode",
+    "problem": "The WBC backend for the VL statistics runs is not specified. Four unpaced VL processes (each about 200 ticks/s) sharing the single-threaded :5556 REP can queue past the 5 ms RCVTIMEO, silently mixing ORT and GPU numerics.",
+    "evidence": "§1.6: VL 'supports several processes in parallel'. WP-1.4: RCVTIMEO 5 ms with a fallback latch.",
+    "fix": "Run VL matrices with --wbc ort and record it in EpisodeLog. Use the GPU WBC only in the RT arms."
+   },
+   {
+    "severity": "minor",
+    "section": "§3.2 C2 sync_hold; SP-7; D15",
+    "problem": "C2 holds the last nav row during inference, so the robot keeps walking blind for d ticks. That is not RTC's 'robot pauses' synchronous baseline, and it biases the time-to-success comparison. Separately, the SP-7 command uses --n_envs 5 and :5555 for cloudwalk, while C0 says n_envs 1 and D15 says :5555 is used only by T-1.5.",
+    "evidence": "§3.2 C2: 'hold the last row (nav included) for d ticks'. §2 SP-7 command block.",
+    "fix": "Define C2's nav during the hold explicitly (held, or ramped to 0) and justify it; optionally run both. Align SP-7 with C0 (n_envs 1) and note the :5555 use in D15."
+   }
+  ],
+  "verified_claims": [
+   "Arm actions are converted from relative to absolute on the server. Each of the 30 rows is added to the same reference, the last observation-time state in the request (state_action_processor.py:440-493; action_chunking.py:340-355; gr00t_policy.py:347-352). Executing row d at tick k_obs + d without re-anchoring, as §1.4.1 and §3.1 specify, is therefore correct.",
+   "Index law: MultiStepWrapper applies row 0 on the first env step after the observation (multistep_wrapper.py:256-263, obs appended at 269). Row i ↔ tick k_obs + i matches the stock path.",
+   "1-tick command lag: compute_observation writes self.cmd, height and rpy into the frame at the end of tick k−1 (g1_gear_wbc_policy.py:154-156, 184). get_action at tick k sets the new cmd (239-252), picks Balance/Walk by ‖new cmd‖ < 0.05 (257-262), and runs the MLP on the older history (264). This matches the plan's LbStep steps 2-5.",
+   "History: 6 × 86 floats, oldest first, zero-filled on the left at episode start (g1_gear_wbc_policy.py:184-195). Reset values cmd_init [0,0,0], height 0.74, rpy 0 (g1_gear_wbc.yaml:37-39) and action zeros (line 46) match the LbStep RESET_HISTORY spec.",
+   "set_goal is called immediately before get_action every tick (n1_utils.py:43-44), so the 1 s monotonic goal timeout (g1_decoupled_whole_body_policy.py:47, 91-110) cannot fire. concat_action always supplies navigate_cmd and base_height_command (n1_utils.py:137-140), so teleop-mode commands are applied (g1_decoupled_whole_body_policy.py:75-77).",
+   "D5 seam: load_onnx_policy is an instance method called once per policy path in __init__ (g1_gear_wbc_policy.py:31-36). It returns a callable that takes and returns a torch tensor (68-75, 264). A class-level patch therefore bypasses ORT session creation and the GR00T_WBC_SERVER hook (60-66) and survives the per-reset re-creation (n1_utils.py:29-33). The policy stems are GR00T-WholeBodyControl-Balance/Walk (configs.py:79-81; ONNX directory listing).",
+   "EGL: CUDA_VISIBLE_DEVICES='' with MUJOCO_EGL_DEVICE_ID unset crashes on int('') (egl_context.py:39-59). The unset case and MUJOCO_EGL_DEVICE_ID=0 both select EGL device 0 (44-49, 59, 65).",
+   "D3: CudaGraphPolicy stores self.stream = current_stream() after capture (gear_wbc_policy.py:83) and synchronizes it (90). Serving from the main thread keeps H2D, replay, D2H and sync on one stream, so the latent stream bug cannot trigger.",
+   "PolicyServer is one REP socket in a serial recv → handler(**data) → send loop that replies with an {'error'} dict on exceptions (server_client.py:69-71, 117-149). PolicyClient never applies timeout_ms (162-177, 210-211).",
+   "options is passed through and ignored, and INFO is {} from the stock GPU server (policy.py:65-90; gr00t_policy.py:306-358, 562-617).",
+   "Stock success is latched over any tick (rollout_policy.py:329-342). terminate_on_success ends the episode at the chunk boundary (multistep_wrapper.py:306-308; rollout_policy.py:463-467). Truncation is counted in ticks (multistep_wrapper.py:271-275).",
+   "Safety: the monitor checks measured dq (joint_safety.py:206-226). In sim, queue_action calls sys.exit(1) on a velocity violation (sync_env.py:516-525; joint_safety.py:451-454). The startup ramp is disabled in sim (sync_env.py:496-497).",
+   "The VLA draws unseeded noise per call: torch.randn with no generator (gr00t_n1d6.py:310-314).",
+   "Env images are uint8 (robocasa_env.py:202-203, 317-318; sync_env.py:335-342). The stock env uses onscreen=False and randomize_cameras=False (rollout_policy.py:104-114).",
+   "The power figures in §4.4 (0.56–0.72 at n=160, 0.73–0.88 at n=250, true Δ=0, discordance 0.32–0.49) reproduce under the normal approximation (my simulation).",
+   "Timing budgets cited from research (5.26 ms/tick, ORT 0.024–0.078 ms, separate-process GPU WBC p99 0.62 ms, paced VLA 65–68 ms, payload 0.92 MB / 0.11–0.14 ms) match understand.json."
+  ],
+  "refuted_or_unverifiable_claims": [
+   "REFUTED: T-1.5 'expected to fail: >= 3% of ticks with WBC RTT > 20 ms'. With the VLA on :5565, :5555 serves no VLA calls, and the 5 ms RCVTIMEO with fallback caps the measured RTT.",
+   "REFUTED (as specified): VL d_inj = 0 is unrealizable, because the VL check in step 2 runs before the step-3 send. T-1.2 as written would see d = 1.",
+   "REFUTED for viewer-on runs: 'Slips = 0' and 'max <= 30 ms' with the pre-roll before anchoring t0. robosuite destroys the mjviewer on reset and relaunches it inside the first env.step (base.py:270-272, 478-484).",
+   "CONTRADICTED: WP-1.5 'the env exactly as rollout_policy builds it' plus an onscreen viewer. The viewer needs onscreen=True (live_viewer.py:100-108), while the stock env uses onscreen=False (rollout_policy.py:104-109). This deviation is missing from §1.1.",
+   "OVERCLAIM: R13 / §6.3(a) 'T-1.3 settles the a[0] ↔ t_obs alignment'. T-1.3 proves equivalence to the loop convention, not the training semantics.",
+   "VACUOUS: the torch.cuda.is_initialized()==False guard. Under CUDA_VISIBLE_DEVICES='' it is always False (client venv torch 2.7.1+cu128).",
+   "INACCURATE: 'stock run_gr00t_server.py, unmodified' and 'GearWbcPolicies (imported, unmodified)'. run_gr00t_server.py is modified and gear_wbc_policy.py is untracked in R, so git SHAs in config.json do not pin them.",
+   "INACCURATE: D4 'no threads on the tick path'. launch_passive runs a render thread, and with process-level pinning it shares CPU 2 with the tick thread.",
+   "INACCURATE: VL d_inj = 3 'emulating the 5090'. Paced 5090 latency gives RT d = 4 at p50.",
+   "INCONSISTENT: T-1.9's 'C4 time-to-success <= C2's at VL d >= 5'. C2 is not in the §4.4 confirm matrix.",
+   "UNVERIFIABLE (unmeasured): viewer.sync p99 <= 3 ms; T-1.4 'max <= 30 ms' over about 28.8k ticks with the HUD, x11grab recording, the viewer and 2 EGL cameras together; d p99 <= 5 under EGL plus two VLA contexts on one GPU (only E3-style probes exist, without sim/EGL load).",
+   "UNVERIFIABLE: bit-exact T-1.3 across different ORT SessionOptions (intra_op 1 vs default). Likely, not guaranteed."
+  ],
+  "summary": "I found no blockers in M1's control and timing on the 5090, but six major issues. The core alignment logic is right. Arm rows come back as absolute targets, all anchored to the observation-time state in the request (state_action_processor.py:461-486; action_chunking.py:340-355). Executing row d at tick k_obs + d without re-anchoring, as the plan does, is therefore correct. The index law, the 1-tick command lag, the Balance/Walk selection, the history layout, the 1 s goal-timeout immunity, the D5 seam, the EGL device rule and the D3 stream argument all check out against the code.\n\nThe six major issues:\n\n1. **T-1.5 negative control.** The merge moved the VLA to :5565 but kept 'WBC on :5555', so :5555 serves no VLA calls and there is nothing to block behind. On top of that, the 5 ms WBC timeout with ORT fallback caps the measured RTT, so the 'RTT > 20 ms' signal can never appear.\n2. **VL d_inj = 0.** The VL visibility check sits in the poll step, which runs before the request is sent in the same tick. Effective d is 1, so T-1.2 (VL equals sync) would fail as written.\n3. **No end-to-end alignment test at d > 0.** Equivalence is only tested at d = 0. A one-tick error in stamping k_obs would go unnoticed; I propose a 'ramp-from-sent-state' mock test that checks it bit-exactly.\n4. **Viewer relaunch inside tick 0.** robosuite destroys the onscreen viewer on every reset and relaunches it inside the first env.step after reset. That step is tick 0, after t0 is anchored, so every viewer-on episode will overrun and fail T-1.4's 'Slips = 0, max <= 30 ms'.\n5. **Confirm statistics.** At n = 250 paired, a single comparison passes with probability 0.81 at true Δ = 0 and 0.35 at Δ = −5 pts. If all three C4 cells must pass, that drops to 0.63 and 0.13. The paired detectable effect is about 12 pts (27 pts at n = 50). T-1.9 also needs a C2 arm the confirm matrix does not run, uses an unpaired, success-only Mann–Whitney test, and its second look inflates α to about 0.064.\n6. **SP-1 rule.** The 'C3 >= C4 → debug alignment' trigger fires about 55% of the time by chance at n = 50.\n\nMinor issues:\n- d_inj = 3 matches TT latency, not the 5090; RT on the 5090 runs at d = 4 at p50.\n- The blend after starvation starts from the stored old row, re-injecting the pre-ramp walking command.\n- FAULT is defined two ways (ends the episode vs keeps holding).\n- The CUDA guard check is vacuous with CUDA hidden.\n- Pinning the whole process to one CPU puts the viewer and ZMQ threads on the tick CPU.\n- The 1000 ms VLA timeout is longer than the 520 ms after which replies are rejected anyway, and the s_eff clamp is undefined when d̂ > 14.\n- An in-flight request at episode end blocks the pre-roll send on the REQ socket.\n- T-1.3 bit equality is exposed to ORT thread settings, a leaking class patch and a stray GR00T_WBC_SERVER variable.\n- Logging gaps: the sent state, measured arm velocity and crash-safe tick logs are missing, and git SHAs do not pin the uncommitted files.\n\nThe highest-leverage fix is an RT-owned GPU VLA wrapper on :5565, which needs no repo edit. It seeds noise per (episode seed, request) to cut variance, and it returns server-side timings, which the stock server does not (INFO is {}). Both the statistics and the logging issues benefit.\n\nAnalysis scripts: /tmp/claude-1000/-home-deepgadget-isaacsim/bfbe65f0-1b38-425e-84fc-4937eb211a38/scratchpad/review_stats.py and /tmp/claude-1000/-home-deepgadget-isaacsim/bfbe65f0-1b38-425e-84fc-4937eb211a38/scratchpad/review_stats2.py."
+ },
+ {
+  "critic": "tt",
+  "issues": [
+   {
+    "severity": "major",
+    "section": "M2 acceptance tests T-2.2, T-2.4 (and T-3.E0/E1 'TT outputs with fixed noise'); WP-2.3; D1 / §1.4.1",
+    "problem": "Several gates need fixed (golden) noise sent to server_g1 and its normalized prediction read back, but the plan never defines a way to do that. W-VLA (D1, frozen) has only `options.rt`, and its reply carries only decoded absolute actions. WP-2.3 lists no such endpoint. An in-process fallback is not possible while server_g1 holds the chip, because a second UMD process blocks on the CHIP_IN_USE mutex.",
+    "evidence": "T-2.2 runs `simpy -m pytest test_g1_fidelity.py --endpoint $VLA_TT` and gates `action_pred_valid` PCC 'with golden noise'. T-2.4 runs `bench_g1.py --abab` 'with fixed noise'. The LIBERO server uses golden noise only inside its boot check (TT/libero/server_n16.py:142-172); per call it draws `torch.randn(..., generator=self.gen)` (:177) and returns only decoded actions (:203-207). UMD LocalChip::start_device acquires MutexType::CHIP_IN_USE (tt_metal/third_party/umd/device/chip/local_chip.cpp:148-151), so an in-process ttnn test job would block until server_g1 exits.",
+    "fix": "Add a test-only endpoint to WP-2.3, enabled by `--debug-endpoints`: `predict_debug(observation, noise: f32(1,50,128)) -> {action_pred_norm: f32(1,50,128), actions: {...}, encode_ms, device_ms, decode_ms}`. State in D1/§1.4.1 that it is outside the frozen W-VLA contract and refused unless the flag is set. Route test_g1_fidelity.py, `bench_g1.py --abab/--determinism` and the e0/e1 'bit-identical before/after' checks through it. Add about 2 h to WP-2.3."
+   },
+   {
+    "severity": "major",
+    "section": "WP-2.3 boot self-check; T-2.2 fidelity thresholds",
+    "problem": "The fidelity gates sit at the edge of the only evidence, and the boot gate is stricter than the acceptance gate. The boot check requires `--min-pcc 0.999` on [:30]×[:35] against an unspecified golden, using the min over its samples. T-2.2 allows min ≥ 0.998. The only TT-vs-fp32 number is 0.999232 (GR1 base). A server that would pass T-2.2 can therefore fail to boot. Separately, the per-group gate '≤ 2× the GPU-bf16-vs-fp32 max|d| of the same sample' divides by near-zero values for low-variance groups such as waist and navigate, so it can fail spuriously.",
+    "evidence": "U:tt 'Correctness evidence for N1.6': served PCC 0.999232 vs fp32, GR1 base only; GPU bf16 vs fp32 is 0.99956. The LIBERO precedent used the default `--min-pcc 0.99` (server_n16.py:243) and measured min 0.99968 / median 0.99993 vs the GPU golden on a fine-tune (libero_eval/n16/openloop_tt_pcc.json). The GPU server runs bf16 (Isaac gr00t_policy.py:82-84), so bf16 is the reference that is actually deployed.",
+    "fix": "Boot check as a sanity gate: PCC ≥ 0.995 against the **bf16** GPU golden. T-2.2 primary gate against the bf16 golden: mean ≥ 0.999, min ≥ 0.998. Against fp32 (secondary): TT-vs-fp32 PCC ≥ (GPU-bf16-vs-fp32 PCC − 0.001) per sample. Per-group gate in absolute units: max|d| ≤ max(2 × the GPU-bf16 max|d| over all 20 samples, 0.02 rad, or 0.02 m/s for nav), excluding left_hand and base_height. State which golden each number uses."
+   },
+   {
+    "severity": "minor",
+    "section": "T-2.1 (CPU parity); WP-2.1/WP-2.2",
+    "problem": "T-2.1 asks `ttpy -m pytest` to show host encode/decode 'bit-identical to the Isaac processor'. The Isaac processor cannot be imported in tt-metal/python_env. The research parity was a two-venv procedure, and no WP produces the reference files that would replace it.",
+    "evidence": "`python_env/bin/python -c 'import albumentations'` → ModuleNotFoundError. The research ran scratchpad/plan_research/parity_isaac.py in the Isaac venv (writes isaac.npz), then parity_port.py in python_env, which loads that npz.",
+    "fix": "Add `srvpy RT/rttt/make_isaac_ref.py` to WP-2.2 (+1 h). On the 20 dumped obs it writes input_ids, pixel_values, normalized state and decoded actions from fixed `pred` arrays to `~/experiments/gr00t/golden/n16_g1/isaac_ref.npz`. T-2.1 compares the port against that file."
+   },
+   {
+    "severity": "minor",
+    "section": "§1.1 process table; D13; §5.2 session model; WP-2.4 `--allow-reset`",
+    "problem": "Device ownership and the reset path are under-specified. The table names server_g1 sole owner of /dev/tenstorrent/0, but x280d holds a keeper fd and a pyluwen window, and E0/E1 job children open more fds while server_g1 serves. With reset-per-session as the default, the reset must pass `fuser` while x280d, started first per D13, is the component that detects 'released but heartbeat dead'. Nothing says x280d must exit before chip_session runs `tt-smi -r 0`. After a reset inside the hold, the guard's probe is not re-run. R29's '1800 s wait' is also imprecise.",
+    "evidence": "_device_guard.sh:23-25 (device_users via fuser), :63-74 (1800 s wait applies only to fds still open at hold start), :93-111 (probe and reset run only at hold start). with-device.sh:8-10: other jobs block on `flock -w ${DEVICE_LOCK_TIMEOUT:-7200}` for the whole session. KMD allows concurrent non-O_EXCL opens (U:x 'Device open arbitration').",
+    "fix": "Fix the table wording: server_g1 owns Tensix/DRAM/CQs via UMD and shares the device node with x280d. Specify chip_session's order: (1) `xpy x280d.py probe --json` opens, reads L2CPU_RESET[7:4] and the heartbeat, closes and exits. (2) If a reset is needed and `--allow-reset` is set: `fuser` must be empty, then `tt-smi -r 0`, then re-run the guard's probe snippet. (3) Start `x280d serve`, which opens the keeper fd. (4) Start server_g1. (5) Run the job. Correct R29: others wait up to 7200 s on the flock; 1800 s applies only to an orphaned fd."
+   },
+   {
+    "severity": "minor",
+    "section": "D12; WP-3.3 audit; R30; x280d design",
+    "problem": "The pyluwen evidence comes from a different version than the one pinned. The claims about KMD-allocated 2 MiB windows and an O_APPEND power-aware open come from luwen 0.10.0 source, but xpy pins pyluwen 0.8.5. The 0.8.5 binary exports both `allocate_tlb` and the index-based `setup_tlb` / `set_default_tlb`, so which path noc_read32/noc_write32 take is unverified. 0.8.5 also has no SET_NOC_CLEANUP binding and no lock compatible with UMD's cross-process ARC_MSG lock.",
+    "evidence": "The research clone is scratchpad/plan_research/x280/src/luwen @ ecef1a8 (2026-10-22, workspace version 0.10.0, single commit). Installed: ~/.tenstorrent-venv pyluwen 0.8.5. Its .so contains `allocate_tlb` ×1, `setup_tlb` ×8, `set_default_tlb` ×2, `noc_cleanup` ×0, and no LOCK_CTL or ARC_MSG lock strings. UMD serialises ARC messages with a shm and KMD resource lock, index 16 (umd/device/utils/lock_manager.cpp:23-45; blackhole_device_firmware.cpp:133).",
+    "fix": "Audit the pyluwen v0.8.5 source tag, not the 0.10.0 clone, or pin 0.10.0 and audit that. Issue SET_NOC_CLEANUP with `fcntl.ioctl` on the keeper fd, using the tt-kmd 2.11 ioctl.h struct. Add an x280d interlock: no ARC messages while any UMD process is up; read telemetry with direct NoC reads of the telemetry table, address cached once. Add 'max TT latency during each fd open/close' to T-3.E3, not just p50."
+   },
+   {
+    "severity": "minor",
+    "section": "M4c (WP-4.3); §1.4.4 lines L38–L63; §1.4.6 chunk descriptor",
+    "problem": "M4c needs the tt-metal process inside the X280 mailbox, and the plan does not say so. Only server_g1 can call `ttnn.cluster.get_dram_bank_table` (it needs a device opened in-process), knows the persistent tensor's address, and knows when the last trace finished. No writer is assigned for the descriptor (L40–L41) or for `chunk_seq`; the table lists the writer as '–'.",
+    "evidence": "ttnn/cpp/ttnn-nanobind/cluster.cpp:191-230 ('The device must be opened first … otherwise this throws'). tt-metal already statically maps LIM on every L2CPU tile (tt_metal/llrt/tlb_config.cpp:99-113), so server_g1 can write LIM with `write_to_core_immediate` (cluster.cpp:155-170). PLAN §1.4.4 table row L38–L63 has writer '–'.",
+    "fix": "Make server_g1 the single writer of L40–L41 (descriptor plus chunk_seq, written with `write_to_core_immediate` after the last trace completes). Alternatively, send {addr, bank_table, seq} to x280d over a local PUSH socket so x280d stays the only host writer. Record the choice in §1.4.4 and WP-4.3."
+   },
+   {
+    "severity": "minor",
+    "section": "WP-2.3 (port of LIBERO split_batch / host binding); T-2.5 stock anchor",
+    "problem": "Two LIBERO defaults carry over badly. LIBERO's `split_batch` converts every key without a `video.`/`state.` prefix with `reshape(-1).tolist()`. The stock rollout used as the T-2.5 anchor sends 12 such keys, including two f32 (1,1,480,640,3) camera duplicates, which adds about 35 ms of host time per call and distorts server latency logs. The server also binds to all interfaces by default.",
+    "evidence": "TT/libero/n16.py:259-266. scratchpad/plan_research/serving/capture_obs.log lists the keys ddq, dq, floating_base_*, q, tau_est, wrist_pose, ego_view_image, tpp_view_image, torso_*. Measured `tolist` on one 480×640×3 f32 frame: 17.5 ms. server_n16.py:239 has `--host` default '*'.",
+    "fix": "In server_g1, keep only the keys from get_modality_config (video.ego_view, the 7 state.* keys, the language key) before splitting. Default `--host 127.0.0.1`."
+   },
+   {
+    "severity": "minor",
+    "section": "WP-2.5; §6.1 Lane D (S1 ≈ 2 h); effort and device-time budget",
+    "problem": "The device-time budget does not add up. WP-2.5 is booked as 6 h of device time and lists T-2.7, but T-2.7 is the 250-paired RT confirmation: it needs WP-2.6's closed loop and is scheduled for week 4. §6.1 books S1 at about 2 h, yet S1 also hosts WP-3.5 (3 h of device time) and the first cold build under a new cache root. Long holds block other users (R29), so the calendar is optimistic.",
+    "evidence": "PLAN WP-2.5 row ('T-2.2…T-2.4, T-2.7; then SP-4 (E0/E1, WP-3.5) in the same hold', 6 h device). WP-3.5 row (3 h). §6.1 week 2: 'S1 (≈ 2 h)'. The LIBERO fine-tune cache directory is now empty (libero_eval/n16/tt_cache), so the G1 build is fully cold.",
+    "fix": "Remove T-2.7 from WP-2.5. Book S1 at about 4–6 h (cold G1 build, T-2.2–T-2.4), or split E0/E1 into their own short hold (S1c). Add the missing M2 items to the estimate: debug endpoint +2 h, Isaac reference +1 h, chip_session reset/probe sequence +2 h. M2 becomes about 55 h + 10 h conditional."
+   },
+   {
+    "severity": "minor",
+    "section": "§1.4.1 INFO `tree` stamp; R23; DP6",
+    "problem": "`live@<hash>` cannot identify the live code. The port directory is untracked in the live tt-metal repo, so a git hash says nothing about which port code served a run.",
+    "evidence": "In ~/experiments/gr00t/tt-metal, `git status --short models/experimental/gr00t` shows `?? models/experimental/gr00t/`, and `git ls-files` returns 0 files. MK is identifiable: `git -C publish/worktree-mk rev-parse HEAD` = 009de892c895….",
+    "fix": "Stamp the live tree as `live@sha256(sorted contents of models/experimental/gr00t/{common,tt}/**/*.{py,cpp,hpp,h})[:12]` and MK as its git HEAD. Compute the stamp from `models.experimental.gr00t.__file__`, not from configuration."
+   },
+   {
+    "severity": "minor",
+    "section": "WP-2.1b (cloudwalk F32→BF16 conversion); disk",
+    "problem": "The plan says 'private HF-cache layout' but not where. install() asserts `snapshot_dir == hf_hub_cache()/models--<repo>/snapshots/<sha>`. Writing the converted snapshot into the shared ~/.cache/huggingface cloudwalk entry would change what the running :5555 server and the stock tools load. Disk space is also tight.",
+    "evidence": "TT/libero/n16.py:170-191 (snapshot_path / install assertion). Port: common/configs.py:45-70 (`hf_hub_cache`, `snapshot_dir`). `df ~`: 92% used, 157 GB free. ~/.cache/gr00t-tt is 43 GB, of which n16 emb20 is 20 GB.",
+    "fix": "Set `HF_HUB_CACHE=~/.cache/gr00t-tt-g1/hub` for ttpy only. Write the snapshot under a distinct repo name, e.g. `…PnPAppleToPlate-bf16`, with a synthetic sha. Never write into ~/.cache/huggingface. Add a preflight check of ≥ 40 GB free before a cold G1 build."
+   },
+   {
+    "severity": "minor",
+    "section": "T-2.6 / gates m2_rt; CPU pinning (§1.1, §4.4 Controls); R21",
+    "problem": "Two smaller gaps in the M2 timing tests. (a) T-2.6 inherits T-1.4's 'VLA p50 ≤ 1.1 × its idle paced value (65 ms)', which is a GPU baseline. (b) server_g1 and the GPU VLA on :5565 are both pinned to cores 8–15 and both run during M2 (hot swap), while :5555 (118 threads) is unpinned. TT outliers include host-side spikes, and the only TT per-call outlier data comes from a run without that contention.",
+    "evidence": "PLAN T-1.4 and T-2.6 rows. Process table rows for :5565 and server_g1 (CPU pin 8–15). LIBERO server log: the 380.46 ms call had encode_ms 95.65 and device_ms 284.5; one other call had encode_ms 49.3 (computed from libero_eval/n16/tt_spatial_r0_server_calls.jsonl: p99 59.46 ms, 2 of 1327 calls > 100 ms).",
+    "fix": "In gates.yaml m2_rt, rebase the VLA p50 gate to 1.1 × the T-2.3 p50. Pin server_g1 to cores 8–11 and :5565 to 12–15, or stop :5565 during T-2.3 and T-2.6. Have analyze_run.py attribute each call over 100 ms to encode, device or decode."
+   },
+   {
+    "severity": "minor",
+    "section": "§6.3 open question (h); R20; WP-2.1",
+    "problem": "Open question (h) and most of R20 can be closed now by inspection rather than waiting for T-2.1. The `_extend_layer_tables` step the plan would port is unnecessary for G1. One small MK incompatibility exists in the backend stamp.",
+    "evidence": "MK and live are identical for common/configs.py, normalization.py, preprocessing.py, tt/layers.py, common/weights.py and common/checkpoint.py (`diff -q`). tt/model.py, tt/weights.py and tt/policy.py differ only by the fused-backbone additions. MK defines TL.MATMUL_CONFIGS (layers.py:627), SDPA_CHUNKS (:935) and FORBIDDEN_SDPA_CHUNKS (:977), plus from_pretrained(cache_root=…, num_command_queues=2) (model.py:802-815). The G1 layout reuses gr1's S_pad 128 geometry (configs.py:977-1005), so no table rows are needed. MK's TTPolicy has no `backbone_backend` attribute, so the LIBERO stamp label becomes '…-None-backbone-…' (n16.py:343-371). No live-tree file is newer than the LIBERO run (find -newermt '2026-09-28 15:40' returns 0).",
+    "fix": "Mark (h) closed. Drop `_extend_layer_tables` from g1_n16.py, or keep it as an assertion that adds 0 rows. Build the stamp label from fields that exist on MK. Keep the MK import test in T-2.1 as a regression guard."
+   }
+  ],
+  "verified_claims": [
+   "D10: MK (publish/worktree-mk/models/experimental/gr00t) has no libero/ directory. The LIBERO server binds before opening the device (server_n16.py:256), draws fresh noise from a generator seeded once (:133, :177), has `info` and a boot golden PCC check (:142-172, :212-223), and replies {'error': str} on any failure while continuing to serve (:302-304). It is a single-threaded REP poller loop (:280-304).",
+   "D10/R21: The LIBERO run went 100/100 with 0 errors, 0 timeouts and 0 hangs (libero_eval/n16/tt_spatial_r0_summary.json). Server total_ms p50 56.43, p99 59.46, max 380.46 ms (1 of 1327 calls over 200 ms). It ran on the live tree (backend stamp has backbone_backend='ttnn', an attribute only the live TTPolicy has).",
+   "DP6 fallback: no live-tree port file has changed since the LIBERO run (0 files newer than 2026-09-28 15:40), so 'the live tree where LIBERO ran 100/100' is still that code.",
+   "MK resolution: under worktree-mk-env.sh, models.experimental.gr00t resolves to worktree-mk (namespace merge order MK, ttml, live), and MK HEAD = 009de892c895. MK's ttnn and build are symlinks into the live build dated 2026-09-14, before the 09-18 snapshot, so the combination is consistent. MK's gr00t code imports no other models.* package.",
+   "MK exposes every API libero/n16.py uses. configs, normalization (lru_cache'd load_processor_kwargs, load_statistics, load_embodiment_id_json, get_embodiment_spec), preprocessing.encode and normalization.decode are identical to the live tree. from_pretrained(cache_root=…, num_command_queues=2) is at model.py:802-815; warm_and_capture, predict_normalized and release exist.",
+   "D11: nvidia/GR00T-N1.6-G1-PnPAppleToPlate@897d0313 is in the HF cache with 1106 tensors, all BF16, and total_size 6,573,217,664. Keys, shapes and shard assignment are identical to base d0814e7, so the port's n_bytes and straddling_prefix accounting (configs.py:825-832) holds. The README reports 58% (examples/GR00T-WholeBodyControl/README.md:11).",
+   "G1 layout injection: the nvidia and cloudwalk G1 checkpoints have identical unitree_g1 modality (ego_view; 7 state keys; 30-step action with arms RELATIVE; language 'annotation.human.task_description') and identical statistics.json; embodiment_id unitree_g1 = 8. The N1.6 gr1 layout is S_pad 128, L_max 24, 81 tokens per image, noise (1,50,128) (configs.py:977-1005). Nothing in tt/ hard-codes the layout name 'gr1' or embodiment 20.",
+   "Fixed noise seed: NOISE_SEED['n16'] = 42 and make_noise/_resolve_noise use it whenever noise=None (MK model.py:151, 900-915). The reference draws torch.randn per call (Isaac gr00t_n1d6.py:310-314).",
+   "F32→BF16 fidelity basis: Gr00tPolicy casts the whole model to bf16 at load (Isaac gr00t_policy.py:82-84).",
+   "Cache pinning: HostPlanCache.directory keys on HF_SNAPSHOT_SHAS[version][:12] unless snapshot_sha is passed (MK common/weights.py:1942-1962). GR00T_TT_CACHE (weights.py:1912-1919) and GR00T_TT_FORCE_CONVERT (weights.py:2082, tt/weights.py:68) exist. Re-pointing the SHA plus a dedicated cache_root avoids the collision.",
+   "Latency basis: bench_e2e_n16_20260918-043703.json gives e2e 41.158 ms (p90 41.83), device 39.44, traces 37.79, host_encode 1.54, num_command_queues 2, per_call_bytes 559,616.",
+   "ttnn.cluster.write_to_core, write_to_core_immediate, read_from_core, read_reg and get_dram_bank_table exist in source (ttnn-nanobind/cluster.cpp:96-230, committed, clean) and in the built build/lib/_ttnn.so. get_dram_bank_table requires a device opened in the calling process.",
+   "tt-metal statically maps 2 MiB windows on every Tensix, ETH and L2CPU tile (L2CPU anchored at LIM base 0x0800_0000) plus 8 × 4 GiB DRAM windows (tlb_config.cpp:79-122). KMD has 202 2 MiB windows, the last reserved for the kernel (tt-kmd blackhole.c:23,43). A separate x280d process with its own 2 MiB windows is feasible on budget.",
+   "Device guard: `flock -w ${DEVICE_LOCK_TIMEOUT:-7200}` (with-device.sh:8-10); fuser busy-wait of 1800 s, then refuse (_device_guard.sh:63-74, 88-91); probe and reset at hold start only (:93-111); WITH_DEVICE_RESET_AFTER exists (:122-130). A nested DEV call blocks on the same flock.",
+   "UMD serialises ARC messages across processes (MutexType::ARC_MSG, shm plus KMD lock index 16, lock_manager.cpp:23-45) and takes CHIP_IN_USE in start_device (local_chip.cpp:148-151). A second tt-metal process cannot share the chip with server_g1.",
+   "Effort arithmetic is internally consistent: M1 = 92 h, M2 = 50 h + 10 h conditional (WP-2.1b 4 + WP-2.7 6), M3 = 92 h."
+  ],
+  "refuted_or_unverifiable_claims": [
+   "§1.1 'server_g1 … sole owner of /dev/tenstorrent/0': refuted for M3. x280d holds a keeper fd and a pyluwen window on the same node, and E0/E1 job children open more fds while server_g1 serves.",
+   "T-2.1 'host encode and decode bit-identical to the Isaac processor', run as `ttpy -m pytest`: not runnable as written. python_env lacks albumentations, and the research parity used two venvs (parity_isaac.py → isaac.npz → parity_port.py).",
+   "D12/R30 'pyluwen KMD-allocated 2 MiB windows' and the O_APPEND power-aware open: the evidence is luwen 0.10.0 source (ecef1a8), while 0.8.5 is pinned. The 0.8.5 binary also exports index-based setup_tlb/set_default_tlb, so the default noc_* path is unverified.",
+   "§1.4.1 `tree: live@<hash>`: a git hash cannot identify the live port, because models/experimental/gr00t is untracked (git ls-files = 0).",
+   "R29 'the keeper fd makes other DEV jobs wait 1800 s and then refuse': imprecise. Other jobs block on the flock for up to DEVICE_LOCK_TIMEOUT (default 7200 s) while chip_session holds it; the 1800 s fuser wait applies only to an fd still open after the hold.",
+   "TT G1 fidelity ≥ 0.999 vs fp32 (boot check and T-2.2): unverifiable. The only evidence is GR1 base (0.999232 vs fp32) and the LIBERO fine-tune (min 0.99968 vs a GPU golden).",
+   "Server total_ms p50 ≤ 45 ms and RTT p99 ≤ 55 ms for G1: a projection (2.63 ms encode + 39.4 ms device + 0.15 ms decode ≈ 42.2 ms) never measured on G1, leaving about 2 ms of margin.",
+   "§5.2 reset-per-session cost 'about 1 minute' for tt-smi -r 0: unverifiable. The part '≈ 4 s warm from_pretrained + capture' is plausible: warm from_pretrained 4.06-4.24 s, and warm-JIT capture 0.3-1.5 s in the LIBERO server logs.",
+   "§6.3(h) listed as open: answerable now. MK has TL.MATMUL_CONFIGS, SDPA_CHUNKS and FORBIDDEN_SDPA_CHUNKS, and the G1 layout (S_pad 128) needs no extra rows."
+  ],
+  "summary": "The M2 (TT) integration claims mostly hold. The process split works, with two gaps in its edge cases.\n\n**What checks out.**\n- The nvidia G1 checkpoint is BF16 with the base byte layout and shard map, so the port needs no conversion. Its unitree_g1 modality and statistics match cloudwalk, so the gr1-geometry layout injection carries over. Nothing in tt/ hard-codes the layout name.\n- The noise seed is fixed at 42 unless noise is passed. Production uses 2 CQs. The cache key is the pinned sha. The latency numbers (41.16 ms GR1; LIBERO 56.4 ms p50, 380 ms max) match their sources.\n- The LIBERO server code ports to MK: the core modules are identical, and the live tree has not changed since the 100/100 LIBERO run.\n- Process architecture: server_g1 (tt-metal python_env, MK) owns Tensix/DRAM/CQs through UMD. The sim client (Isaac venv) talks to it only over ZMQ msgpack. A second tt-metal process cannot share the chip (UMD's CHIP_IN_USE mutex).\n- For M3, the X280 host side does not have to live in the tt-metal process. KMD allows concurrent opens and has 202 2 MiB windows, against about 158 static ones taken by tt-metal. `ttnn.cluster.*` exists in the built binary as the in-process alternative. M4c does need server_g1 inside the mailbox: only it can get the DRAM bank table and the tensor address.\n\n**Major issues.**\n- The fidelity, stale-state and E0/E1 gates need fixed golden noise and the normalized prediction from server_g1. The frozen W-VLA contract and WP-2.3 provide neither, and an in-process fallback is impossible while server_g1 holds the chip.\n- The boot PCC gate (0.999, golden unspecified) is stricter than T-2.2's own minimum (0.998) and sits on the only evidence (0.99923). The per-group ratio gate can fail on near-zero denominators.\n\n**Minor issues.**\n- T-2.1's parity cannot run in python_env (no albumentations).\n- The ownership table and the reset-per-session order (x280d must exit before `fuser`; the guard probe is not re-run after the reset) are under-specified.\n- The pyluwen evidence comes from 0.10.0 while 0.8.5 is pinned. 0.8.5 has index-based TLB APIs, no SET_NOC_CLEANUP and no UMD-compatible ARC lock.\n- `split_batch` costs about 35 ms per stock-rollout call, and the server binds to all interfaces.\n- The `tree` stamp cannot identify the untracked live tree.\n- The cloudwalk conversion location is unspecified, and disk is 92% full.\n- The M2 VLA p50 gate uses a GPU baseline, and server_g1 shares CPU pins with the GPU VLA.\n\n**Effort.** M2 at about 50 h is realistic next to the research's 32-40 h, but misses about 5 h (debug endpoint, Isaac reference, reset sequencing). Device time is understated: S1 is booked at about 2 h but holds 9 h of device WPs and a fully cold build. WP-2.5 also wrongly lists T-2.7."
+ },
+ {
+  "critic": "x280",
+  "issues": [
+   {
+    "severity": "blocker",
+    "section": "§1.4.4 bullet 1 (full-line LIM init); §5.2 boot step 2; WP-3.4 (pyluwen window); T-3.4; T-3.E1; R26",
+    "problem": "The plan's LIM-ECC mitigation can't be built with the tool it picks, its own cited source contradicts it, and its gate has no way to see a failure. x280d writes LIM only through pyluwen's KMD-allocated 2 MiB window. That window is mapped uncached (UC) and filled with u32 copies, so no host write ever reaches LIM as one 64-byte line, and every 'full-line zero-fill' is really a run of partial writes. The tt-metal evidence the plan cites says host writes are not enough: initializing LIM ECC 'requires running code on the L2CPU itself'. T-3.4's dry-run only sees API-level call sizes, not what goes over the wire. T-3.E1 passes on 'no fault', but host NoC writes are posted, so an ECC fault never comes back to the host. If E1 fails there is no fallback branch, because GDDR is forbidden and LIM is the only memory left, so M3 as designed stops.",
+    "evidence": "tt-metal tests/tt_metal/distributed/test_hd_sockets.cpp:463-467 ('...a partial-line write to LIM whose ECC has not been initialised can fault, and initialising it requires running code on the L2CPU itself'). This conflicts with ttnn/cpp/ttnn-nanobind/cluster.cpp:119-120 ('write a full 64-byte line first'), so tt-metal's own sources disagree. luwen@ecef1a8 crates/luwen-kmd/src/lib.rs:412-429: allocate_tlb mmaps only data.output.mmap_offset_uc. crates/luwen-kmd/src/pci.rs:441-520: memcpy_to_device copies as *mut u32. The installed pyluwen 0.8.5 .so contains 'Failed to map uc buffer' and no WC-mapping string. tt-kmd-2.11.0 ioctl.h:276-282 and memory.c:984 do offer mmap_offset_wc, which luwen ignores. UMD write_to_device uses the cached WC window with IoOrdering::Relaxed (third_party/umd/device/chip/local_chip.cpp:262-272), so tt-metal's write_to_core is the only existing host path that can combine writes into lines.",
+    "fix": "(a) Give x280d its own small ctypes KMD layer: ALLOCATE_TLB, CONFIGURE_TLB, then mmap at mmap_offset_wc. Add a ~30-line C helper that writes LIM-init and LOAD data as 64 B-aligned non-temporal stores (AVX-512 _mm512_stream_si512 on the 7950X) followed by sfence. Keep pyluwen UC only for writes of 4 B or less. As an alternative, do E1 and LOAD through ttnn.cluster.write_to_core in 64 B-aligned 64 B chunks. (b) Give T-3.E1 a real check: read the L3 (CCACHE) ECC fix/fail counters and the per-hart Bus-Error Unit accrued registers (0x0170_0000 + 0x1000·h) before and after, and read back every line. (c) Add an E1-fail branch to §5.2: a stage-0 initializer run by the hart itself. Point the reset vector at a stub of 64 B or less in the GP scratch that zero-fills LIM with vse8 at vl=64 (one full line per store), signals, and waits; install the park stub afterwards and fence.i. This spends the S2 release, so DP3 must approve it explicitly. (d) T-3.4 checks transaction sizes logged by the helper, not API call sizes. (e) Quote the full test comment in R26's evidence column."
+   },
+   {
+    "severity": "major",
+    "section": "WP-3.2 (crt0/monitor/RNMI park); §5.2 boot step 4; T-3.E2 'PARK via RNMI then re-CALL'; WP-3.9 proof switch; R24",
+    "problem": "The RNMI park mechanism, which is the only defence against the once-only reset, is under-specified in a way that disables it after its first use. The RNMI trigger is level-triggered. Entry clears mnstatus.NMIE, and only mnret or a software CSR write sets it again. The ISA-recommended stub jumps to the reset handler instead of executing mnret, so NMIE stays 0 and no later RNMI is delivered. A payload that hangs after the first park then burns the tile. The plan also gives no handshake for the host to clear the trigger bit; if it stays set while NMIE is re-armed, the hart re-enters immediately. The X280 uses non-standard CSR numbers 0x350-0x353, so assembler names for Smrnmi would encode the wrong CSRs.",
+    "evidence": "tt-isa-documentation@0610df6 BlackholeA0/L2CPUTile/RNMIs.md:4-6 (NMIE=1 at reset; CSRs 0x350-0x353, not 0x740-0x744), :15-19 (trigger is level-triggered; hardware sets NMIE←0 on entry), :30-34 (completion only via mnret 0x70200073 or a CSR write; 'the hart will suffer another RNMI after the handler completes'), :61 (set handler addresses before reset and never change them). README.md:30: the recommended stub runs fence.i and jumps to the reset handler, with no mnret. PLAN WP-3.2 lists only 'csrw 0x7c1,0; mstatus FS/VS on' for crt0.",
+    "fix": "Specify the handshake. The host sets bit h at 0x2001_0414. The stub runs fence.i, writes 'parked' to L1, and spins until it reads bit h of 0x2001_0414 as 0. crt0/monitor then re-arms with `csrsi 0x353, 8` (MNIE) before taking commands. The RNMI-exception handler (+8) is a separate, minimal spin stub. Use numeric CSRs 0x350-0x353 and `.word 0x70200073`. T-3.2 (check_image) rejects any access to CSRs 0x740-0x744. T-3.E2 tests the re-arm directly: run a deliberately hung payload (an infinite loop), then PARK → CALL → hang → PARK on the same hart, 10/10."
+   },
+   {
+    "severity": "major",
+    "section": "§1.3 (X280 0.1–0.6 ms); §1.4.4 memory layout (code+data+bss+16 KiB stack in LIM; '5–25 µs'); R33 (v0 scalar ≤ 3 ms fallback); T-3.E4/m3_rt gates; WP-3.7 ordering",
+    "problem": "The timing estimate assumes cacheable data, but LIM is uncached. Every weight, activation, bss and stack access the X280 makes to LIM bypasses the L1D/L2, and the plan puts all of them in LIM. The research's '4–16 B/cycle' is an explicit assumption, and the scalar 1.2–1.8 ms figure only holds for cached data. If an uncached LIM load costs about 25 cycles and loads don't overlap, scalar v0 needs 469K × 25 ≈ 11.7M cycles ≈ 15 ms at 800 MHz, which is near the 20 ms tick and far over the ≤ 3–4 ms fallback gate. The primary sources also disagree on whether code fetched from LIM is cached in L1I. The 5–25 µs mailbox estimate ignores pyluwen's cost: one CONFIGURE_TLB ioctl per call plus about 528 u32 UC stores for the 2,112 B observation each tick.",
+    "evidence": "ISA L2CPUTile/Caches.md:26-31: the data-cacheable ranges exclude LIM. Caches.md:13-14 says L1I caches LIM, but tt-bh-linux@9f9597d README.md:273 gives LIM the PMA 'RWX A' (neither I nor D) and :277 gives the Zero Device 'RWXIDA'. Caches.md:36: one outstanding L1D fill. understand.json x280 F21: 'bandwidth/latency figures are assumptions pending experiment E4'. luwen-kmd lib.rs:524-541 (setup_tlb → configure_tlb ioctl :467-489 on every noc_read/noc_write).",
+    "fix": "Make a LIM latency/throughput microbench the first LOAD/CALL payload in S2, right after the monitor selftest: pointer chase, scalar stream, vle32 at m1/m4/m8, and a loop running from LIM. Derive the §1.3 numbers and the v0/v1/v2 gates from it before investing in WP-3.7. Add a cacheable working-set option and measure it in E4: stack and activations in the Zero Device (0x0A00_0000, cached), pinned into the single existing L3 way through CCACHE0_WAYMASK0. This needs no WAYENABLE write (Caches.md:75, :95-99). Replace the 5–25 µs estimate with a host bench of pyluwen (or WC-helper) mailbox calls measured during S1/E1."
+   },
+   {
+    "severity": "major",
+    "section": "§5.2 'Order' table (Recovery column for E1/E2/E3); D13; WP-2.4 chip_session --allow-reset; T-3.E2 command; R29",
+    "problem": "The written recovery paths can't run as stated. `WITH_DEVICE_RESET_AFTER=1` is read from the guard's own environment after its child exits, so chip_session or x280d can't request it after a failure. 'On the next hold' means the next job runs on a damaged chip. The guard's probe is a Tensix-only ttnn add, so a wedged L2CPU tile passes it and the guard never resets on its own. T-3.E2/E3 is invoked without `--allow-reset`, and only that flag lets chip_session run `tt-smi -r 0`. So 'ledger burned, end the session with WITH_DEVICE_RESET_AFTER=1' has no working mechanism.",
+    "evidence": "~/experiments/gr00t/bin/_device_guard.sh:122-130 (reads WITH_DEVICE_RESET_AFTER after `wait $child`) and :33-44 (probe = ttnn.open_device + ttnn.add on Tensix only). PLAN T-3.E2: `$DEV $RT/scripts/chip_session.sh --x280 boot:3 --vla none --job …` (no --allow-reset). WP-2.4: '--allow-reset: run tt-smi -r 0 only when fuser … shows no other users'.",
+    "fix": "Make chip_session own the reset after any failure in an X280 session. On a failed E-step or a burned tile: stop the children, check fuser, run `tt-smi -r 0`, wait about 5 s for telemetry (boot.py:109), and exit non-zero. Enable this for every X280 session under DP3. Alternatively, always launch X280 holds as `WITH_DEVICE_RESET_AFTER=1 $DEV …`, which is cheap under reset-per-session. Add an L2CPU health check (CCACHE0_CONFIG read, WAYENABLE==0, heartbeat state) at chip_session start, because the guard can't see L2CPU damage. Fix the 'on the next hold' wording."
+   },
+   {
+    "severity": "major",
+    "section": "WP-3.2 / T-3.2 (x86 build only); §5.2 E2 preconditions",
+    "problem": "The one-shot release image never runs on any RISC-V model before it spends L2CPU3's single release. crt0, the trap/RNMI paths, vector setup (vsetvli/FS/VS), fence.i, CSR numbers and the mnret encoding are first executed on silicon. The x86 monitor build tests only the protocol logic. No RISC-V emulator is installed, even though the research recommends one.",
+    "evidence": "`which spike qemu-riscv64 qemu-system-riscv64` returns nothing on this host (understand.json x280 F18: 'no QEMU/spike'). x280 recommendation (6) suggests qemu-user or spike. PLAN WP-3.2: 'An x86 build of the monitor is used for unit tests'.",
+    "fix": "Add WP-3.2b (about 4 h): build spike from source in user space (no sudo) and run it with `--isa=rv64gcv_zfh_zba_zbb --varch=vlen:512,elen:64 -m0x8000000:0x1e0000` plus a host-side mailbox driver (spike's HTIF/debug, or a shared-memory plugin). Test SELFTEST, LOAD/FENCE_I/CALL, INFER bit-parity against the x86 build, and the illegal-instruction trap dump to L1. Stub the X280-only RNMI CSRs behind a build flag. Make the T-3.2b pass a precondition of E2."
+   },
+   {
+    "severity": "major",
+    "section": "§1.4.4 L0/L1 layout and per-tick protocol; WP-3.4 SET_NOC_CLEANUP; T-3.8",
+    "problem": "The protocol assumes L0 lands as one write ('writes L0 with seq_req = n as a UC Strict write'). pyluwen actually sends the 52 B as several UC stores in memcpy order, and seq_req sits at byte 8, ahead of policy, tick, flags and crc32. The X280 can therefore see the new seq_req with a stale policy or tick unless it waits for the CRC to match. SET_NOC_CLEANUP's kernel write puts a single u32 into L0.flags without updating crc32. That breaks the 'one writer per line' rule, and a CRC-validating firmware would reject the update and never see HOST_GONE, so T-3.8 would fail.",
+    "evidence": "luwen-kmd pci.rs:441-520 (block writes are u32-granular copies). tt-kmd-2.11.0 ioctl.h:332-360 ('@data … upper 32 bits are ignored') and chardev.c:1030-1039 (one noc_write32 at release, :1101, before power re-aggregation at :1115). PLAN §1.4.4 L0 field order: magic, cmd, seq_req, policy, tick, flags, …, crc32.",
+    "fix": "Move seq_req to the last word of L0 and write it in a separate 4 B call after the body; the firmware acts only once crc32 matches. Put HOST_GONE in its own line (for example L38), written only by the KMD cleanup, cleared by x280d at attach, and kept out of every CRC. Read the u64 heartbeat as hi, lo, hi to avoid torn reads. Validate SET_NOC_CLEANUP during E1 with no release: register it at a LIM test word, close the fd, read the word back."
+   },
+   {
+    "severity": "minor",
+    "section": "§5.2 boot steps 6/8; WP-3.4 interlock 'PLL4 fbdiv 64 / postdiv 1'; T-3.E0",
+    "problem": "'postdiv 1' is ambiguous: CNTL_1 has its own postdiv field, which is 0 at the CMFW default, separate from the four CNTL_5 postdivs. tt-bh-linux clock.py has no 800 MHz entry, so the step back to 800 MHz is new, untested code. DP4's second tile (L2CPU2) would need a second PLL excursion to 200 MHz, which also slows any tile already running.",
+    "evidence": "fw-19.12.0 lib/tenstorrent/bh_arc/pll.c:225-236: PLL4 CNTL_1 {refdiv 2, postdiv 0, fbdiv 64}, CNTL_5 postdiv0..3 = 1, use_postdiv all 1. tt-bh-linux clock.py:14-19 (solutions are 200/1750/15 only). drivers/clock_control/clock_control_tt_bh.c:256-266 (postdiv 0 = gated; n ≤ 16 divides by n+1).",
+    "fix": "State the interlock values exactly: CNTL_1 (0x8002_0504) == 0x0040_0002, CNTL_5 (0x8002_0514) == 0x0101_0101, USE_POSTDIV (0x8002_051C) low nibble == 0xF. Add an 800 entry [64,[1,1,1,1]] that keeps clock.py's order (raise postdivs, then fbdiv, then lower postdivs). Release every tile a session needs (bits 6|7 under DP4) in one read-modify-write during a single excursion, never while another tile is serving."
+   },
+   {
+    "severity": "minor",
+    "section": "R27; §4.1 'each fd open or close relocks PLL4'; T-3.E3 (second fd ×10, tt-smi -s)",
+    "problem": "The claim is too broad. Only legacy (non-O_APPEND) opens, and closes of fds that contribute power flags, send a power message. pyluwen and tt-smi open O_APPEND and contribute nothing. So E3's '10× second fd' and 'tt-smi -s' steps may never trigger a relock, and the test could pass without exercising the hazard. Only the server_g1 start/stop step reliably does.",
+    "evidence": "tt-kmd-2.11.0 chardev.c:954 (power_aware = O_APPEND), :1017 (aggregates on open only if !power_aware), :1074-1085 (no message on close when no_power_contrib). luwen-kmd lib.rs:235-239 (.append(true)). ttsmi_snapshot_idle.json shows L2CPUCLK0..3 = 0x0 while tt-smi itself is open. Each message that is sent does run bypass, power-down and relock four times (clock_control_tt_bh.c:316-357, 361-392; bh_power.c:32-54).",
+    "fix": "In T-3.E3, do the fd churn with `os.open('/dev/tenstorrent/0', os.O_RDWR)` (legacy), and show that a relock happened, e.g. a monitor-measured dip in mcycle per mtime, or PLL4 CNTL_0 bypass/lock reads. Keep 'no tt-smi during runs' as policy, but correct the reason given."
+   },
+   {
+    "severity": "minor",
+    "section": "WP-3.4 interlock 'L2CPUCLK3 > 0 in telemetry'; §5.2 invariant 4; R28",
+    "problem": "Telemetry is a 100 ms-cadence snapshot, so a read just after gating can still show 800 MHz. The plan also never checks harvest bits, which tt-bh-linux asserts before booting.",
+    "evidence": "fw-19.12.0 lib/tenstorrent/bh_arc/telemetry.c:278 and :591-592 (telem_update_interval = 100 ms) and :505-512 (L2CPUCLK computed from PLL registers). tt-bh-linux boot.py:113-115 asserts enabled_l2cpu and enabled_gddr.",
+    "fix": "Before each batch of L2CPU-tile accesses, read PLL4 CNTL_5.postdiv3 ≠ 0 and USE_POSTDIV bit 3 directly from the always-on ARC tile (8,0). Add ENABLED_L2CPU bit 3 to the E0 and boot interlocks."
+   },
+   {
+    "severity": "minor",
+    "section": "D12 / xpy (pyluwen 0.8.5); WP-3.3 audit; R30",
+    "problem": "The research read the luwen 0.10.0 source, but the plan pins the installed 0.8.5. Its behavior is inferred, not read. The 0.8.5 binary has no NoC-cleanup support, so SET_NOC_CLEANUP needs a raw ioctl, which the plan doesn't say.",
+    "evidence": "luwen clone Cargo.toml:47 version = \"0.10.0\" (shallow, 1 commit). `pip show pyluwen` → 0.8.5. strings on pyluwen.cpython-310-x86_64-linux-gnu.so: 'allocate_tlb' and 'Failed to map uc buffer' present, 'noc_cleanup' absent.",
+    "fix": "Run the WP-3.3 audit on the 0.8.5 source tag, or pin 0.10.0 in .venv-x280 and audit that. Implement SET_NOC_CLEANUP in x280d with fcntl.ioctl and a packed struct tenstorrent_set_noc_cleanup (argsz 32) on the keeper fd."
+   },
+   {
+    "severity": "minor",
+    "section": "T-3.4 'zero writes to L2CPU_RESET[3:0]' vs §5.2 boot step 7",
+    "problem": "The release is a 32-bit read-modify-write that necessarily rewrites bits [3:0], so the T-3.4 assertion as worded can't pass.",
+    "evidence": "ISA L2CPUTile/README.md:39 (bits 0-3 'Reserved; software should not modify'). tt-bh-linux boot.py:80-84 (axi_read32, then axi_write32 of the whole word).",
+    "fix": "Assert exactly one write to 0x8003_0014, whose value equals the preceding read OR 0x80, with [3:0] == 0xF, followed by a read-back."
+   },
+   {
+    "severity": "minor",
+    "section": "§5.2 Order (E1 in S1 with server_g1 serving); WP-3.5",
+    "problem": "The first LIM writes ever made run alongside a live TT session. The safer split is to establish 'LIM writes are safe' with no TT running, then check coexistence with TT.",
+    "evidence": "PLAN WP-3.5: 'E0 read-only probe and E1 LIM test, with server_g1 serving a 3 Hz bench loop'. The E1 worst case in §5.2 is 'LIM fault or wedged tile'.",
+    "fix": "Split E1. E1a: keeper fd only, no TT, run after server_g1 stops at the end of S1. E1b: the same pattern with TT serving, for the bit-identity and p50 ±2% verdict. A failed E1a then costs only a reset."
+   },
+   {
+    "severity": "minor",
+    "section": "§1.4.4 weights row (fp16 weights, fp32 biases, 1,882,312 B)",
+    "problem": "The size counts biases as fp16. With fp32 biases (1,586 per policy) the blob is 6,344 B larger, plus headers and padding. It still fits, but the stated end address 0x081D_C8C8 is wrong.",
+    "evidence": "understand.json x280 F16: 470,578 params per policy, fp16 for both = 1,882,312 B. Bias count 256+256+35+512+256+256+15 = 1,586.",
+    "fix": "Take the end address from pack_weights.py output (about 0x081D_E1D0 plus header) and keep T-3.2's ≤ 0x081E_0000 check on the real blob."
+   },
+   {
+    "severity": "minor",
+    "section": "§5.2 ledger: 'new epoch when L2CPU_RESET[7:4] == 0'",
+    "problem": "This test can't distinguish 'chip was reset' from 'no tile released yet'. If another user releases a different tile after a reset, a new epoch looks like the old one.",
+    "evidence": "fw-19.12.0 reset.c:388-391 (only [3:0] set at boot) and ISA README.md:35-44.",
+    "fix": "Store the ARC telemetry TIMER_HEARTBEAT (monotonic since CMFW boot) in the ledger. A smaller value on the next read means a new epoch. Keep the per-tile bit test for release versus attach."
+   }
+  ],
+  "verified_claims": [
+   "Once-only release: 'harts within each L2CPU tile can only be brought out of reset once; re-reset requires resetting the entire ASIC' (ISA@0610df6 BlackholeA0/L2CPUTile/README.md:29-30). CMFW skips L2CPU soft resets because of BH-25/BH-28 (fw-19.12.0 lib/tenstorrent/bh_arc/reset.c:87,137).",
+   "L2CPU_RESET is at ARC NoC (8,0) 0x8003_0014. CMFW sets bits [3:0] (tile reset_n) to 0xF; bit 4+idx releases the RISC cores; bit 7 = L2CPU3 at (8,7) (ISA README.md:35-44; fw-19.12.0 init.h:16,84-85 and reset.c:388-391; tt-system-firmware tt-bh-reset.h 'tile [3:0], RISC [7:4]'; tt-bh-linux boot.py:25-30,76-85).",
+   "Reset vectors at 0xFFFF_F7FE_FFF1_0000 + 8h, RNMI handler/exception handler at …0418 + 16h / +8, RNMI trigger bits at …0414, 64 B GP scratch at …0100. The high-alias offset is 0xFFFF_F7FE_DFF0_0000 (ISA MemoryMap.md:104-119; RNMIs.md:38-59; boot.py:118,232-239).",
+   "PLL4 base is 0x8002_0500 (0x8002_0100 + 4·0x100); CNTL_1 at +4 = {refdiv u8, postdiv u8, fbdiv u16}, CNTL_5 at +0x14 = 4 postdivs. The CMFW default (refdiv 2, fbdiv 64, CNTL_5 postdivs = 1) gives 800 MHz; 200 MHz = fbdiv 128, postdiv 15 (fw-19.12.0 pll.c:22-29,225-236; tt-bh-linux clock.py:10-19).",
+   "Harts must leave reset at a low L2SYS clock (ISA README.md:32-33).",
+   "Every power message that is sent makes CMFW re-run the full PLL4 sequence (bypass, power-down, VCO from cached settings, relock) once per L2CPUCLKn, so any host-set frequency reverts to 800 MHz (fw-19.12.0 bh_power.c:32-54,100-104; drivers/clock_control/clock_control_tt_bh.c:316-357,361-392).",
+   "On this card the L2CPU clock is gated when idle and runs at 800 MHz (0x320) under tt-metal load; ENABLED_L2CPU = 0xf; firmware bundle 19.12.0.0; KMD 2.11.0 with power_policy=Y and idle_power_down_grace_ms=5000 (docs/research/device-microbench/ttsmi_snapshot_{idle,load_1}.json; /sys/module/tenstorrent).",
+   "A legacy open contributes all power flags except MAX_AI_CLK; an O_APPEND open contributes none; power-down happens 5000 ms after the last close (tt-kmd-2.11.0 chardev.c:954,985-990,1017,1074-1090). UMD opens legacy O_RDWR|O_CLOEXEC and its BUSY state includes L2CPU_ENABLE (umd pci_device.cpp:381-383,1114; local_chip.cpp BUSY/IDLE).",
+   "At reset LIM is 15 × 128 KiB = 1,966,080 B at 0x0800_0000–0x081D_FFFF, and CCACHE0_WAYENABLE (0x0201_0008) can only increase (ISA Caches.md:73,84-93).",
+   "LIM data is not cacheable, and the L1D has a single outstanding fill (ISA Caches.md:26-31,36; tt-bh-linux README.md:273 PMA 'RWX A').",
+   "tt-metal 668c290 maps a static 2 MiB host TLB onto every L2CPU tile at the LIM base with Strict ordering (tt_metal/llrt/tlb_config.cpp:99-113; tlb_config.hpp:23-25). The MK snapshot has the same code, and its ttnn/build are symlinks into the live build (publish/worktree-mk-env.sh:1-4).",
+   "ttnn.cluster.write_to_core, read_from_core, write_to_core_immediate, read_reg and get_dram_bank_table exist in source (ttnn/cpp/ttnn-nanobind/cluster.cpp:96-230) and in the compiled tt-metal/build_Release/lib/_ttnn.so (2026-09-14), which MK uses.",
+   "With the watcher on, host writes to L2CPU outside [0x0800_0000, 0x0820_0000) throw (tt_metal/llrt/sanitize_noc_host.hpp:148-155).",
+   "tt-metal and UMD touch L2CPU tiles only through TLB config, the watcher, sockets, the harvest mask and power flags; UMD's broadcast loop covers only TENSIX and DRAM (grep over tt_metal/ttnn/umd; umd device/cluster.cpp broadcast loop). CMFW excludes column 8 from broadcast (fw-19.12.0 noc_init.c:123-125).",
+   "tt-kmd exposes 202 × 2 MiB windows with the last one reserved for the kernel, and its 4 GiB windows are limited by BAR4 (tt-kmd-2.11.0 blackhole.c:22-37,632-637).",
+   "SET_NOC_CLEANUP performs a single u32 NoC write when the fd is released, before the TLBs are freed and power is re-aggregated (tt-kmd-2.11.0 ioctl.h:332-360; chardev.c:1030-1039,1101-1115).",
+   "Why tt-bh-linux can't coexist: board reset (README.md:161; boot.py:103-105), WAYENABLE=0xF (boot.py:209-212), two 4 GiB windows (console/l2cpu.cpp:69-70; the research cited :122-123, which is wrong), Linux/rootfs at the bottom of the attached GDDR (Makefile:114).",
+   "GDDR attachment: L2CPU0→D5, L2CPU1→D6, L2CPU2 and L2CPU3 share D7 (ISA README.md:23; boot.py:32-37).",
+   "Translated L2CPU coordinates (8,26..29) map to (8,3/9/5/7) (fw-19.12.0 noc_init.c:562-568).",
+   "X280 device tree: rv64imafdcv_zicsr_zifencei_zfh_zba_zbb_sscofpmf, timebase 50 MHz (0x2faf080), no Zvfh/Zvfhmin listed (tt-bh-linux misc/blackhole-p100-3.dts:14,21-23).",
+   "RNMI semantics as described in issue 2 (RNMIs.md:4-6,15-19,30-34,61)."
+  ],
+  "refuted_or_unverifiable_claims": [
+   "REFUTED: 'Every touched line is zero-written as a full 64 B line' using pyluwen 2 MiB windows. luwen maps only the UC aperture and copies u32-wise (luwen-kmd lib.rs:412-429; pci.rs:441-520).",
+   "REFUTED or contested: host full-line writes are enough to initialize LIM ECC. The source the plan cites says initialization requires running code on the L2CPU (test_hd_sockets.cpp:463-467), while cluster.cpp:119-120 says a full-line write is enough.",
+   "REFUTED (too broad): 'each fd open or close relocks PLL4'. Only legacy fds and fds with an explicit power state send messages (chardev.c:954,1017,1074-1085).",
+   "UNVERIFIABLE / likely optimistic: X280 WBC 0.1–0.6 ms vector and 1.2–1.8 ms scalar. These assume 4–16 B/cycle from cacheable memory, but LIM data is uncached; nothing has been measured.",
+   "UNVERIFIABLE / likely optimistic: mailbox overhead 5–25 µs. pyluwen issues a CONFIGURE_TLB ioctl per call plus u32 UC stores.",
+   "UNVERIFIABLE: whether X280 instruction fetch from LIM is cached in L1I. ISA Caches.md:13-14 says yes; the tt-bh-linux README.md:273 PMA omits 'I'.",
+   "UNVERIFIABLE: VLEN 512 and 8 fp32 FMA per cycle on Blackhole's X280 (SiFive marketing only; T-3.E2 checks vlenb).",
+   "UNVERIFIABLE: harts keep running correctly through CMFW's PLL4 bypass/relock and through clock gating (T-3.E3/E3(d) are meant to test this).",
+   "UNVERIFIABLE: the installed pyluwen 0.8.5 behaves like the 0.10.0 source the research read (constructor side effects, TLB use). 0.8.5 lacks NoC-cleanup bindings.",
+   "UNVERIFIABLE: the ISA's GDDR tile 'D5/D6/D7' equals tt-metal DRAM bank/channel 5/6/7 (research confidence medium; matters only in M4c).",
+   "UNVERIFIABLE: the effect of a partial write to uninitialized LIM (bus error, RNMI cause 3, silent corruption or a wedge). The plan's E1 can't observe it as written.",
+   "UNVERIFIABLE: tt-smi -s sends no power message at all. The idle snapshot shows it doesn't ungate L2CPU, but an explicit 'set_power' call can't be ruled out offline."
+  ],
+  "summary": "Every X280 register address and bit layout the plan uses checks out against the firmware and documentation sources: reset register, reset vectors, RNMI handler addresses, PLL4, CCACHE/LIM, the L2CPU coordinate mapping, the KMD power policy and TLB counts. tt-metal's static 2 MiB L2CPU LIM window and the ttnn.cluster raw-NoC bindings exist in the live build, and MK uses that build through symlinks. Neither tt-metal nor UMD writes to L2CPU tiles, so concurrent operation is plausible. The experiment order is broadly safest-first, and there is a demo-level fallback (ORT/GPU/x280-sim): CPU-only work, then dry-run, read-only probe, LIM writes, release with no TT running, power tests, payloads, shadow run and finally the X280 as primary.\n\nThe plan still rests on one unworkable mechanism. x280d writes LIM through pyluwen's uncached, u32-granular window, which can't produce the full 64 B line writes the plan's ECC invariant requires. The tt-metal comment the plan cites says LIM ECC initialization needs code running on the L2CPU, E1 has no way to detect a fault, and there is no fallback if E1 fails. That is the blocker.\n\nMajor gaps:\n- RNMI park disables itself after first use: no NMIE re-arm, no trigger-clear handshake, and the X280's custom CSR numbers aren't noted.\n- The timing estimate ignores that LIM is uncached for data, while stack, bss and weights all live there; the v0 scalar fallback is probably far over budget.\n- The recovery mechanics can't run as written: WITH_DEVICE_RESET_AFTER can't be requested by a child, the guard's probe is Tensix-only, and the release session has no --allow-reset.\n- The one-shot image never runs on a RISC-V emulator first; none is installed.\n- L0's write order and CRC, together with the KMD cleanup write, break the mailbox's atomicity and its one-writer-per-line rule.\n\nMinor issues: ambiguous PLL4 interlock values, an over-broad relock claim that lets E3 pass without testing anything, an interlock based on telemetry that can be 100 ms stale, the 0.8.5 vs 0.10.0 pyluwen mismatch, the wording of the [3:0] assertion, splitting E1, weight-blob arithmetic, and epoch detection.\n\nPrimary-source clones are under /tmp/claude-1000/-home-deepgadget-isaacsim/bfbe65f0-1b38-425e-84fc-4937eb211a38/scratchpad/plan_research/x280/src/ (tt-isa-documentation@0610df6, tt-bh-linux@9f9597d, tt-kmd-2.11.0@c05f224, luwen@ecef1a8 = 0.10.0, fw-19.12.0@fe27c0e, tt-system-firmware@d12c837). tt-metal is at ~/experiments/gr00t/tt-metal@668c290. No files were written and the device was not touched."
+ }
+]

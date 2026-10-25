@@ -1,0 +1,7 @@
+# xpy = $RT/.venv-x280 (PLAN.md §0 interpreters, D12): numpy + pyzmq + msgpack, no pyluwen, no ttnn.
+# Create: python3 -m venv $RT/.venv-x280 && $RT/.venv-x280/bin/pip install -r $RT/x280/requirements.txt
+# Pinned to what was installed on 2026-10-24 (Python 3.10.12).
+numpy==2.2.6
+pyzmq==27.2.0
+msgpack==1.2.3
+pytest==9.1.1

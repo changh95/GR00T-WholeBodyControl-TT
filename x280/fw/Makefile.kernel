@@ -1,0 +1,107 @@
+# gear_wbc MLP kernel builds (PLAN.md WP-3.1). Standalone: `make -f Makefile.kernel kernel-all`;
+# the firmware Makefile includes this file and links $(WBCK_RV64_OBJS) into the LIM image.
+#
+#   kernel-x86         build/kernel/libwbc_mlp.so  (ctypes parity test, tests/x280/test_kernel_x86.py)
+#   kernel-rv64        build/kernel/rv64/{wbc_mlp,elu}.o and wbc_kernel.o (ld -r of both)
+#   kernel-rv64-fma    the same with -DWBC_RVV_FMA (vfmacc; E4 experiment, not bit-parity)
+#   kernel-report      sizes, undefined symbols (must be none), Zvfh scan, static op counts
+#   kernel-expf-check  exhaustive expf/ELU error measurement on x86 (about 1 min)
+#   kernel-clean
+#
+# Everything is include-safe: variables are prefixed WBCK_, paths are relative to this file, and
+# the includer's default goal is left alone.
+
+WBCK_DIR   := $(patsubst %/,%,$(dir $(lastword $(MAKEFILE_LIST))))
+WBCK_BUILD ?= $(WBCK_DIR)/build/kernel
+WBCK_SAVED_GOAL := $(.DEFAULT_GOAL)
+
+WBCK_CC      ?= clang-20
+WBCK_LD      ?= ld.lld-20
+WBCK_NM      ?= llvm-nm-20
+WBCK_OBJDUMP ?= llvm-objdump-20
+WBCK_SIZE    ?= llvm-size-20
+
+WBCK_SRCS := $(WBCK_DIR)/wbc_mlp.c $(WBCK_DIR)/elu.c
+WBCK_HDRS := $(WBCK_DIR)/wbc_mlp.h
+
+# Shared by both targets: no fused multiply-add anywhere (bit-parity contract in wbc_mlp.h), no
+# errno-setting sqrt, no libc, no builtin library-call recognition (so no hidden memcpy/memset).
+WBCK_COMMON := -std=c11 -O2 -Wall -Wextra -ffreestanding -fno-builtin -nostdlib -ffp-contract=off \
+               -fno-math-errno -fno-strict-aliasing -I$(WBCK_DIR)
+
+# x86-64 baseline ISA (no FMA instructions exist there); a self-contained shared object.
+WBCK_X86_CFLAGS  := $(WBCK_COMMON) -march=x86-64 -fPIC
+WBCK_X86_LDFLAGS := -shared -nostdlib -Wl,--no-undefined -Wl,-z,noexecstack
+
+# PLAN.md WP-3.2 flags, plus: auto-vectorisers off, so v0/v2s stay scalar and every vector
+# instruction comes from the explicit intrinsics (v1/v2, ELU); per-function sections for --gc-sections.
+WBCK_RV64_CFLAGS := --target=riscv64-unknown-elf -march=rv64gcv_zfh_zba_zbb -mabi=lp64d -mcmodel=medany \
+                    $(WBCK_COMMON) -fno-vectorize -fno-slp-vectorize -ffunction-sections -fdata-sections
+
+WBCK_X86_SO     := $(WBCK_BUILD)/libwbc_mlp.so
+WBCK_RV64_OBJS  := $(WBCK_BUILD)/rv64/wbc_mlp.o $(WBCK_BUILD)/rv64/elu.o
+WBCK_RV64_KOBJ  := $(WBCK_BUILD)/rv64/wbc_kernel.o
+WBCK_FMA_OBJS   := $(WBCK_BUILD)/rv64-fma/wbc_mlp.o $(WBCK_BUILD)/rv64-fma/elu.o
+WBCK_EXPF_CHECK := $(WBCK_BUILD)/expf_check
+
+.PHONY: kernel-all kernel-x86 kernel-rv64 kernel-rv64-fma kernel-report kernel-expf-check kernel-clean
+
+kernel-all: kernel-x86 kernel-rv64
+
+kernel-x86: $(WBCK_X86_SO)
+kernel-rv64: $(WBCK_RV64_OBJS) $(WBCK_RV64_KOBJ)
+kernel-rv64-fma: $(WBCK_FMA_OBJS)
+
+$(WBCK_X86_SO): $(WBCK_SRCS) $(WBCK_HDRS)
+	@mkdir -p $(@D)
+	$(WBCK_CC) $(WBCK_X86_CFLAGS) $(WBCK_X86_LDFLAGS) -o $@ $(WBCK_SRCS)
+
+$(WBCK_BUILD)/rv64/%.o: $(WBCK_DIR)/%.c $(WBCK_HDRS)
+	@mkdir -p $(@D)
+	$(WBCK_CC) $(WBCK_RV64_CFLAGS) -c -o $@ $<
+
+$(WBCK_BUILD)/rv64-fma/%.o: $(WBCK_DIR)/%.c $(WBCK_HDRS)
+	@mkdir -p $(@D)
+	$(WBCK_CC) $(WBCK_RV64_CFLAGS) -DWBC_RVV_FMA -c -o $@ $<
+
+$(WBCK_RV64_KOBJ): $(WBCK_RV64_OBJS)
+	$(WBCK_LD) -r -o $@ $^
+
+# Hosted on purpose (libm is the reference); the kernel sources are compiled with the same flags.
+$(WBCK_EXPF_CHECK): $(WBCK_DIR)/elu.c $(WBCK_HDRS)
+	@mkdir -p $(@D)
+	$(WBCK_CC) -std=c11 -O2 -ffp-contract=off -fno-strict-aliasing -march=x86-64 -I$(WBCK_DIR) \
+	    -DWBC_EXPF_CHECK_MAIN -o $@ $(WBCK_DIR)/elu.c -lm
+
+kernel-expf-check: $(WBCK_EXPF_CHECK)
+	$(WBCK_EXPF_CHECK)
+
+kernel-report: $(WBCK_X86_SO) $(WBCK_RV64_OBJS) $(WBCK_RV64_KOBJ)
+	@echo "== rv64 sizes (text/data/bss, bytes)"; $(WBCK_SIZE) $(WBCK_RV64_OBJS) $(WBCK_RV64_KOBJ)
+	@echo "== undefined symbols (must be empty)"
+	@for f in $(WBCK_RV64_KOBJ) $(WBCK_X86_SO); do \
+	    u="$$($(WBCK_NM) -u --format=just-symbols $$f)"; echo "$$f: [$$u]"; \
+	    test -z "$$u" || { echo "FAIL: undefined symbols in $$f"; exit 1; }; done
+	@echo "== Zvfh/Zvfhmin scan (vfwcvt.f.f / vfncvt.f.f, must be 0)"; \
+	    n=$$($(WBCK_OBJDUMP) -d --mattr=+v,+zfh $(WBCK_RV64_KOBJ) | grep -cE 'vfwcvt\.f\.f|vfncvt\.f\.f'); \
+	    echo $$n; test "$$n" = 0
+	@echo "== static instruction counts per function"; \
+	    $(WBCK_OBJDUMP) -d --no-show-raw-insn $(WBCK_RV64_KOBJ) | awk ' \
+	    /^[0-9a-f]+ <.*>:$$/ { if ($$2 !~ /^<\.L/) { f=$$2; gsub(/[<>:]/,"",f) }; next } \
+	    /^ +[0-9a-f]+:/ { m=$$2; n[f]++; \
+	        if (m ~ /^v(l|s)e[0-9]+\.v$$/) vm[f]++; else if (m ~ /^vf/) vf[f]++; \
+	        else if (m ~ /^v/) vo[f]++; else if (m ~ /^f(l|s)[wdh]$$/ || m ~ /^(l|s)[bhwd]u?$$/) sm[f]++; \
+	        else if (m ~ /^f/) sf[f]++; } \
+	    END { printf "%-22s %6s %6s %6s %6s %6s %6s\n","function","insns","vmem","vfp","vother","smem","sfp"; \
+	        for (f in n) printf "%-22s %6d %6d %6d %6d %6d %6d\n", f, n[f], vm[f], vf[f], vo[f], sm[f], sf[f] }' \
+	    | { IFS= read -r h; echo "$$h"; sort; }
+
+kernel-clean:
+	rm -rf $(WBCK_BUILD)
+
+# Standalone use gets kernel-all as the default goal; an includer keeps its own.
+ifeq ($(words $(MAKEFILE_LIST)),1)
+.DEFAULT_GOAL := kernel-all
+else
+.DEFAULT_GOAL := $(WBCK_SAVED_GOAL)
+endif
