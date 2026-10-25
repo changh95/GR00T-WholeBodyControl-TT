@@ -1,8 +1,8 @@
 """Pure-numpy float64 forward pass of the gear_wbc ONNX policies (PLAN.md §1.4.3, D3).
 
 It needs no onnxruntime, so x280/tools/pack_weights.py reads the policies through it when it packs the X280
-weight blobs. It reads only the ONNX initializers and re-implements the graph that
-``rtserve/vendor/gear_wbc_policy.py:GearWbcMLP`` ports: estimator 516-256-256-35 (ELU), latent =
+weight blobs. It reads only the ONNX initializers and re-implements the exported graph: estimator
+516-256-256-35 (ELU), latent =
 est[:, 3:] / max(||est[:, 3:]||, 1e-12), actor on cat(obs[:, -86:], est[:, :3], latent). The op
 sequence of the file is asserted, so a re-exported graph with a different shape fails loudly
 instead of drifting. tests/test_wbc_backend.py checks this against onnxruntime in the simpy venv.

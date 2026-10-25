@@ -717,9 +717,6 @@ def collect_config(argv, extra: dict | None = None, trees: dict | None = None) -
         "git": states,
         "imported_dirty": imported_dirty(states),
     }
-    sums = RT / "rtserve" / "vendor" / "SHA256SUMS"
-    if sums.exists():
-        cfg["vendor_sha256sums"] = sums.read_text().splitlines()
     for key, value in (extra or {}).items():
         cfg[key] = value
     return jsonable(cfg)
