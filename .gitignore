@@ -18,3 +18,9 @@ x280/refs/linux-*.c
 # frozen copies for device sessions (scripts/snapshot.sh: git worktrees) and full-resolution recordings (GitHub release)
 snapshots/
 docs/media/*.mp4
+# development worktrees (git worktree add worktrees/<name>)
+worktrees/
+# in snapshots and worktrees these two are links back to the main tree
+/runs
+/.venv-x280
+/SNAPSHOT_COMMIT
