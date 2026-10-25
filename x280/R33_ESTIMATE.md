@@ -130,3 +130,56 @@ pays almost linearly if S_4(P0) >= 3.4); S_4(P2) >= 1.5 x S_4(P1) and a P4 peak 
 (stagger the slices); S_4 <= 1.3 everywhere with P1 ~ P2 and a growing K3 under load means a shared port (no gain).
 End to end the split saves at most ~265 us of x280d's 661 us p50; the monitor's L0/obs CRC and ~276 us of host time
 stay. A 16-hart version (all four tiles) needs the user's approval after this 4-hart result.
+
+## v3: the single-hart kernel (2026-10-25, model; silicon check in E4/E5a)
+
+**What limits v2 on one hart.** S3b's K9 (v2's per-group loop: vle16 m2, flw, vwmul, vand, vfmul 2^112, vfmul x, vfadd)
+takes 39.01 cycles per 128 B and K10 (the same five vector ops, no loads) 39.006, while K12 (the loads alone) takes
+28.3. So the loads already overlap the arithmetic and one hart is bound by its single vector arithmetic pipe at about
+7.8 cycles per e32m4 op. The 2.62 GB/s (41 % of the 6.4 GB/s port) is the rate of five ops per 64 weights. It does not
+come from too few loads in flight. Rescheduling alone (deeper look-ahead, wider LMUL) leaves the main loop where it is,
+and only the tails would gain (below). The single-hart lever is fewer vector ops per weight.
+
+**v3 = v2's arithmetic minus one op.** v2 forms p = (w' * 2^112) * x with w' = the fp16 bits shifted into fp32 position
+(w * 2^-112). The first multiply is exact. v3 forms X = x * 2^112 once per row (one fmul.s) and p = w' * X. For
+|x| < 2^16, X is exact too (subnormal x included), so w' * X equals w * x as a real number and rounds to the same p.
+The adds, their order and the ELU are v2's. So the bits are v2's, and each weight group costs vwmul + vand + vfmul +
+vfadd (4 ops, not 5). Every row ANDs |x| < 2^16 into a flag. A layer where some row fails (|x| >= 2^16, inf, NaN) is
+computed again by v2's gemv_f16_rvv, which costs one v2 layer extra and has never happened on logged obs. Schedule
+(inline asm in wbc_mlp.c, because clang reorders the intrinsic version): e32m8 with two groups of 128 outputs.
+Each row's two 256 B weight loads go into the registers that the previous row's vwmul has just read, so each load has
+7 ops (~109 cycles) to arrive in. x[i+1] loads during row i. The 35- and 15-column tails run in blocks of 4 rows,
+interleaved to break each row's vwmul->vand->vfmul chain at short vl, with the next block's weights and x loading.
+
+| Per INFER (one hart, 800 MHz) | v2 (measured 307,877) | v3 (model) | Basis |
+|---|---|---|---|
+| Main rows (1,782 x 256 outputs; 912 KB) | 278 K (4 x 39 per row) | 205-222 K (115-125 per row) | K9: 7.8 cycles per m4 op; v3's 4 m8 ops = 8 m4-equivalents. Low end: vwmul at its source width (llvm-mca's SiFive7 costs) |
+| L2 + L6 tails (512 rows, vl 35 / 15) | ~20 K (residual) | 11-13 K (in-order bound 19 K) | L2: max(VA 20-32, LIM 2.1 lines x 8 + flw 7.8 = 24) per row; L6: LIM 1.45 lines x 8 + 7.8 = 20 per row |
+| ELU (1,536 values, e32m4) | ~6.3 K | ~6.3 K | 24 strips x ~33 ops x 8; unchanged (shared with v2) |
+| Biases, stores, concat/normalise, call and layer drains | ~3 K | ~3 K | unchanged |
+| **Total** | **307.9 K = 0.385 ms** | **225-251 K = 0.28-0.31 ms** (central ~236 K, v3/v2 ~0.77) | high end: tails at their in-order bound |
+
+Evidence on the CPU (no device):
+- Bit identity: x86 v3 (the same arithmetic in scalar code) equals v2 on all 10,080 logged obs + 256 N(0,1) for both
+  policies and on 31 crafted rows (guard edge 65535.996 / 65536, +-inf, NaN, FLT_MAX, subnormals, +-0, x 1e4..1e6
+  scaled rows). The per-product identity holds for all 63,488 finite fp16 weights x ~6,500 x values with |x| < 2^16,
+  and breaks at x = 2^16, so the guard sits exactly at the edge (tests/x280/test_kernel_x86.py). Spike (RVV, VLEN 512):
+  v3 equals spike v2 and x86 v2 on 1,000 logged obs, on infer_const/BENCH, and on 16 crafted + 8 plain obs whose
+  fallback rows show in the instruction counts (tests/x280/test_spike.py, T-3.2b).
+- Spike instructions per INFER: v3 54,145 vs v2 78,287 (0.69). A row with a fallback in every layer costs 130,189.
+- llvm-mca -mcpu=sifive-x280 (`make -f Makefile.kernel kernel-mca`): v3 main row 125 cycles (block RThroughput 120);
+  v2's row of the same 256 outputs is 197 (RThroughput 164). The tails are 172 / 121 cycles per 4-row block (m4 / m1).
+  This model is in order and charges a full LMUL per op, so the tail figures are an upper bound.
+- No vector spills in gemv_f16_v3 (test_rv64_objects_are_freestanding); monitor.bin 28,444 -> 29,448 B (kernel text
+  5,550 -> 6,590 B); v2's gemv_f16_rvv and forward compile to the same instructions as before; no Zvfh.
+
+Silicon check (jobs/e4_bench.sh: the E4 matrix includes v3; e4_choice.json `v3_vs_v2` gives cyc_min per policy and
+v3/v2 against 225-251 K; jobs/e5_parity.sh runs v3_fp16 against x86 v2 on the 10k obs, bit for bit):
+- v3 in 225-251 K: the model holds, and the single-hart kernel is at its vector-pipe floor (4 ops per weight without Zvfh).
+- v3 >= ~290 K: the arithmetic pipe was not the limit after all, and this section's reading of K9/K10 is wrong.
+- v3 < 225 K: vwmul is cheaper than either reading. Fine.
+The session default stays v2 (monitor pick_variant, x280d) until both pass.
+
+Multi-hart consequence: a v3 hart streams ~4.1 B/cycle (512 B per ~125 cycles), about half of one tile's 7.97 B/cycle
+vle ceiling (K5-K8). Two harts on one tile would saturate LIM (K9 already reached 5.05 GB/s on 2 harts), so for v3 the
+4-tile split (one LIM port each) is the next step, not 4 harts on one tile.

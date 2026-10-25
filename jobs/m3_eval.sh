@@ -8,7 +8,7 @@
 #                     CHIP_X280D_SERVE_ARGS="serve --port 5558 --tile 3 --stage0 --slow")
 #
 # The session x280d booted with --stage0 (the standard E1F boot since 2026-10-25) or --boot; the job reads neither.
-# m3_rt, not m3_rt_slow, is T-3.7's set: E1F measured the v2-fp16 kernel at 0.385 ms compute, x280d p99 0.69 ms
+# m3_rt, not m3_rt_slow, is T-3.7's set: E1F measured the v2-fp16 kernel at 0.385 ms compute (v3, the default since S3v3, 0.278 ms), x280d p99 0.69 ms
 # (DP11's fallback is for a compute p99 > 2 ms). The S1b T-2.3 bench above is the clean one (server span p50 of the
 # deployed checkpoint and arena); viewer rows are gated, so run with DISPLAY set (rt_sim --viewer, the aux CPUs).
 #   1  Session gate sets: gates.yaml's m3_rt and m3_rt_slow copied whole (x280/tools/m3_jobs.py m3-gates;

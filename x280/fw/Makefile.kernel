@@ -5,6 +5,8 @@
 #   kernel-rv64        build/kernel/rv64/{wbc_mlp,elu}.o and wbc_kernel.o (ld -r of both)
 #   kernel-rv64-fma    the same with -DWBC_RVV_FMA (vfmacc; E4 experiment, not bit-parity)
 #   kernel-report      sizes, undefined symbols (must be none), Zvfh scan, static op counts
+#   kernel-mca         llvm-mca -mcpu=sifive-x280 on v3's asm loops (the LLVM-MCA-BEGIN regions in wbc_mlp.c): main
+#                      row (256 outputs), tail blocks of 4 rows at m4 / m1 (x280/R33_ESTIMATE.md "v3")
 #   kernel-expf-check  exhaustive expf/ELU error measurement on x86 (about 1 min)
 #   kernel-clean
 #
@@ -20,6 +22,7 @@ WBCK_LD      ?= ld.lld-20
 WBCK_NM      ?= llvm-nm-20
 WBCK_OBJDUMP ?= llvm-objdump-20
 WBCK_SIZE    ?= llvm-size-20
+WBCK_MCA     ?= llvm-mca-20
 
 WBCK_SRCS := $(WBCK_DIR)/wbc_mlp.c $(WBCK_DIR)/elu.c
 WBCK_HDRS := $(WBCK_DIR)/wbc_mlp.h
@@ -44,7 +47,7 @@ WBCK_RV64_KOBJ  := $(WBCK_BUILD)/rv64/wbc_kernel.o
 WBCK_FMA_OBJS   := $(WBCK_BUILD)/rv64-fma/wbc_mlp.o $(WBCK_BUILD)/rv64-fma/elu.o
 WBCK_EXPF_CHECK := $(WBCK_BUILD)/expf_check
 
-.PHONY: kernel-all kernel-x86 kernel-rv64 kernel-rv64-fma kernel-report kernel-expf-check kernel-clean
+.PHONY: kernel-all kernel-x86 kernel-rv64 kernel-rv64-fma kernel-report kernel-mca kernel-expf-check kernel-clean
 
 kernel-all: kernel-x86 kernel-rv64
 
@@ -95,6 +98,17 @@ kernel-report: $(WBCK_X86_SO) $(WBCK_RV64_OBJS) $(WBCK_RV64_KOBJ)
 	    END { printf "%-22s %6s %6s %6s %6s %6s %6s\n","function","insns","vmem","vfp","vother","smem","sfp"; \
 	        for (f in n) printf "%-22s %6d %6d %6d %6d %6d %6d\n", f, n[f], vm[f], vf[f], vo[f], sm[f], sf[f] }' \
 	    | { IFS= read -r h; echo "$$h"; sort; }
+
+# llvm-mca's SiFive7 model is in order (scalar and vector in one pipeline, no vector-queue decoupling) and charges
+# a full LMUL per op whatever vl is, so its tail figures are a pessimistic bound; the main row is the useful number.
+$(WBCK_BUILD)/rv64/wbc_mlp.s: $(WBCK_DIR)/wbc_mlp.c $(WBCK_HDRS)
+	@mkdir -p $(@D)
+	$(WBCK_CC) $(WBCK_RV64_CFLAGS) -S -o $@ $<
+
+kernel-mca: $(WBCK_BUILD)/rv64/wbc_mlp.s
+	@$(WBCK_MCA) -mtriple=riscv64 -mcpu=sifive-x280 -iterations=200 $< 2>&1 | \
+	    awk '/^\[[0-9]+\] Code Region - /{r=$$NF} /^Iterations:/{it=$$2} /^Total Cycles:/{c=$$3} \
+	         /^Block RThroughput:/{printf "%-14s %8.1f cycles per iteration (block RThroughput %s)\n", r, c/it, $$3}'
 
 kernel-clean:
 	rm -rf $(WBCK_BUILD)

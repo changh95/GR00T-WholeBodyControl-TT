@@ -194,7 +194,7 @@ x280_step st status && x280_step sel selftest
     assert r.returncode == 0, _fail(r)
     assert "BOOT=stage0" in r.stdout + r.stderr
     st, sel = s.json("st.json"), s.json("sel.json")
-    assert st["mode"] == "booted" and st["backend"] == "x280-sim:v2-fp16" and sel["pass"] and sel["lines"] == 30720
+    assert st["mode"] == "booted" and st["backend"] == "x280-sim:v3-fp16" and sel["pass"] and sel["lines"] == 30720
     log = (s.dir() / "x280d.log").read_text()
     assert "E1F step A" in log and "E1F step E" in log and "step 2: LIM init" not in log and "READY" in log
     assert _started(s, "x280d")[0].endswith(s.serve_args)  # the session's args as given: --cpus kept, no --cpus 5
@@ -263,7 +263,9 @@ def test_s3_and_t35_jobs_in_one_stage0_hold(session, tmp_path):
               X280_PARITY_OBS=obs, X280_PARITY_N=160, X280_PARITY_N_V0=40, M3_RTT_N=300)
     assert r.returncode in (0, 1), _fail(r)
     ch = s.json("e4_choice.json")
-    assert ch["recommended"] in ("v2-fp16", "v2s-fp16", "v1-fp32") and not ch["tier"].startswith("shadow"), ch
+    assert ch["recommended"] in ("v2-fp16", "v2s-fp16", "v3-fp16", "v1-fp32"), ch
+    assert not ch["tier"].startswith("shadow"), ch
+    assert set(ch["v3_vs_v2"]) == {"GR00T-WholeBodyControl-Balance", "GR00T-WholeBodyControl-Walk"}, ch["v3_vs_v2"]
     want = sorted(int(c) for c in CLIENT_CPUS.split(","))
     assert ch["rtt_client"]["thread_cpus"] == [want[0]] and ch["rtt_client"]["io_cpu"] == want[-1], ch["rtt_client"]
     assert set(ch["t35_gates_busy"]) == {"x280d_p99_le_compute_p99_plus_500us", "x280d_p99_le_limit",
@@ -271,6 +273,7 @@ def test_s3_and_t35_jobs_in_one_stage0_hold(session, tmp_path):
     e5 = s.json("e5_summary.json")
     assert e5["pass"] and e5["boot"] == "stage0" and e5["obs"] == str(obs), e5
     assert e5["runs"]["session"]["rows"] == 160 and e5["runs"]["v0_fp32_balance"]["rows"] == 40
+    assert e5["runs"]["v3_fp16"]["pass"] and e5["runs"]["v3_fp16"]["variant"] == "v3"
     t35 = s.json("t35_summary.json")
     assert t35["gates"].startswith("PLAN T-3.5") and set(t35["checks"]) == set(ch["t35_gates_busy"])
     # every call answered or counted (the sim's timing is not the X280's: its rows may fail here, never vacuously)

@@ -513,8 +513,10 @@ Job helpers and environment:
 The contract between the kernel, the firmware and x280d. `wbc_infer(blob, policy, variant, obs, act, scratch)` with
 `WBC_SCRATCH_BYTES` = 4096 (960 floats used); returns 0 or `WBC_EINVAL` -1 … `WBC_EDTYPE` -9 (magic, version,
 size, CRC, layout, policy, variant, dtype). Variants v0 (scalar fp32, the bit-parity reference), v1 (RVV fp32, riscv
-only), v2 (fp16 weights widened with integer ops, fp32 math; RVV on riscv), v2s (scalar fp16); `wbc_variants_built()`
-is 0b1101 on x86, 0b1111 on riscv+V. Blob v1: 320 B header (`magic` "WBCB" @0, version, hdr_bytes, total_len,
+only), v2 (fp16 weights widened with integer ops, fp32 math; RVV on riscv), v2s (scalar fp16), v3 (fp16, bit-identical
+to v2 on every input with one vector op fewer per weight: v2's exact 2^112 scale on x[i]; RVV e32m8 asm on riscv, the
+same arithmetic in scalar code on x86; not the default until silicon E4/E5a pass); `wbc_variants_built()` is 0b11101
+on x86, 0b11111 on riscv+V. Blob v1: 320 B header (`magic` "WBCB" @0, version, hdr_bytes, total_len,
 `crc32` @16 = zlib CRC-32 over bytes [20, total_len), wdtype, layout W^T [in][out], policy_mask, n_layers 7,
 align 64, the source .onnx CRCs, 2 × 7 layer descriptors, a 32 B tag); weights transposed in 64 B-aligned arrays,
 biases fp32. Arithmetic: every multiply and add rounded separately (RNE, no FMA, `-ffp-contract=off`, frm = 0), so

@@ -12,10 +12,11 @@
 # (5,600 Balance, 4,480 Walk) with the ORT action: PLAN's "10k obs".
 # Runs, through the serving x280d (x280d parity):
 #   - the session kernel (v2 on fp16, both policies, unless the session was started otherwise);
-#   - v2s on fp16; v0 and v1 on the fp32 Balance blob, then on the fp32 Walk blob (one fp32 policy per blob, DP4).
-# Pass (T-3.E5a): against the x86 build of the same blob v0/v2/v2s bit-identical, v1 <= 1e-5; against the logged ORT
-# action <= 1e-2 (fp16) / <= 5e-5 (fp32). Expected from the kernel lane: fp32 <= 1.53e-5, fp16 <= 7.36e-3 (logged obs
-# <= 8.5e-4). A difference on silicon points to frm, a flush mode or a hardware deviation (kernel lane notes).
+#   - v2s and v3 on fp16; v0 and v1 on the fp32 Balance blob, then on the fp32 Walk blob (one fp32 policy per blob, DP4).
+# Pass (T-3.E5a): against the x86 build of the same blob v0/v2/v2s/v3 bit-identical (v3 against x86 v2), v1 <= 1e-5;
+# against the logged ORT action <= 1e-2 (fp16) / <= 5e-5 (fp32). Expected from the kernel lane: fp32 <= 1.53e-5, fp16
+# <= 7.36e-3 (logged obs <= 8.5e-4). A difference on silicon points to frm, a flush mode or a hardware deviation (kernel
+# lane notes).
 # v0 runs ~15-45 ms per call on uncached LIM (§1.3): ~5k rows per fp32 blob take minutes, and a step that outlives
 # X280_TIMEOUT_S (900 s) is an X280-dirty exit, so X280_PARITY_N_V0 (2000) caps v0's rows. v0 is the parity
 # reference (bit-identical vs x86); the fp32 ORT bound on all rows is v1's. e5_summary.json gives every run's rows.
@@ -39,12 +40,13 @@ run() {  # run TAG N [x280d parity args]
     x280_step "e5_$tag" parity --obs "$OBS" --n "$n" --out "$CHIP_SESSION_DIR/e5_$tag.npz" "$@"
     rcs+=("$tag=$?")
 }
-# L36.variants_built (bit v = variant v): the riscv+V image builds 0b1111; skip what the image does not have
+# L36.variants_built (bit v = variant v): the riscv+V image builds 0b11111; skip what the image does not have
 vb=$(x280 status | python3 -c "import json,sys; d=json.loads(sys.stdin.read().strip().splitlines()[-1]); print(d['tiles']['3']['l36']['variants_built'])") ||
     x280_dirty "E5a: no status from x280d"
 built() { [ $(( vb >> $1 & 1 )) = 1 ]; }
 run session "$N"
 built 3 && run v2s_fp16 "$N" --kernel v2s
+if built 4; then run v3_fp16 "$N" --kernel v3; else job_log "v3 not built in this image (0x$(printf %x "$vb")): skipped"; fi
 for b in fp32_balance fp32_walk; do
     built 0 && run "v0_$b" "$NV0" --blob "$b" --kernel v0
     if built 1; then run "v1_$b" "$N" --blob "$b" --kernel v1; else job_log "v1 not built in this image (0x$(printf %x "$vb")): skipped"; fi

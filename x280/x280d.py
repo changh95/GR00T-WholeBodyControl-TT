@@ -101,10 +101,11 @@ BLOB_FP16 = KERNEL_BUILD / "wbc_fp16.blob"
 BLOB_FP32 = {0: KERNEL_BUILD / "wbc_fp32_balance.blob", 1: KERNEL_BUILD / "wbc_fp32_walk.blob"}
 
 POLICIES = ("GR00T-WholeBodyControl-Balance", "GR00T-WholeBodyControl-Walk")  # index = WBC_POLICY_* (wbc_mlp.h)
-VARIANTS = {"v0": 0, "v1": 1, "v2": 2, "v2s": 3}  # WBC_VARIANT_* (wbc_mlp.h)
+VARIANTS = {"v0": 0, "v1": 1, "v2": 2, "v2s": 3, "v3": 4}  # WBC_VARIANT_* (wbc_mlp.h)
 VARIANT_NAME = {v: k for k, v in VARIANTS.items()}
-VARIANT_DTYPE = {0: "fp32", 1: "fp32", 2: "fp16", 3: "fp16"}  # WBC_EDTYPE otherwise (wbc_mlp.h)
-X86_FAMILY = {0: 0, 1: 0, 2: 2, 3: 2}  # bit-identical x86 reference variant (wbc_mlp.h arithmetic contract)
+VARIANT_DTYPE = {0: "fp32", 1: "fp32", 2: "fp16", 3: "fp16", 4: "fp16"}  # WBC_EDTYPE otherwise (wbc_mlp.h)
+X86_FAMILY = {0: 0, 1: 0, 2: 2, 3: 2, 4: 2}  # bit-identical x86 reference variant (wbc_mlp.h arithmetic contract)
+X86_EXACT = frozenset({0, 2, 3, 4})  # must equal X86_FAMILY's x86 build bit for bit; v1 within X86_TOL
 WDTYPE = {"fp32": 0, "fp16": 1}  # WBC_WDTYPE_* (wbc_mlp.h), blob header offset 20
 PARITY_TOL = {"fp32": 5e-5, "fp16": 1e-2}  # T-3.1 / T-3.E5a / T-3.6 limits vs ORT
 X86_TOL = 1e-5  # T-3.E5a: v1/v2 vs the x86 build of the same blob (v0 must be bit-identical)
@@ -473,7 +474,8 @@ class Session:
             raise ValueError(f"tiles {tiles}: one tile, or two for DP4 fp32 (Balance on the first, Walk on the second)")
         self.backend, self.tiles, self.dtype = backend, tuple(tiles), dtype
         self.sim = backend == "sim"
-        v = variant or ("v2" if dtype == "fp16" else ("v0" if self.sim else "v1"))
+        # fp16 default v3 since S3v3 2026-10-25: bit-identical to v2 on silicon (E5a, 10,080 obs) and 0.72x its cycles
+        v = variant or ("v3" if dtype == "fp16" else ("v0" if self.sim else "v1"))
         if VARIANT_DTYPE[VARIANTS[v]] != dtype:
             raise ValueError(f"variant {v} needs {VARIANT_DTYPE[VARIANTS[v]]} weights, not {dtype} (WBC_EDTYPE)")
         self.variant = VARIANTS[v]
@@ -1338,7 +1340,7 @@ class Session:
                     if ref is not None:
                         worst = max(worst, float(np.max(np.abs(act.astype(np.float64) - ref))))
                 out[POLICIES[p]] = worst
-        ok = all(v <= (0.0 if self.variant in (0, 2, 3) else X86_TOL) for v in out.values())
+        ok = all(v <= (0.0 if self.variant in X86_EXACT else X86_TOL) for v in out.values())
         self.boot_parity = {"max_abs_vs_x86": out, "pass": ok, "n": n}
         return self.boot_parity
 
@@ -1813,12 +1815,12 @@ class Session:
             raise X280Error(f"{e} (quiesced: {q})") from e
 
     def bench_matrix(self, t: int, iters: int = 1000, policies=(0, 1)) -> dict:
-        """T-3.E4 matrix: every built variant on its weight dtype (v0/v1 fp32, v2/v2s fp16), per policy, with the
+        """T-3.E4 matrix: every built variant on its weight dtype (v0/v1 fp32, v2/v2s/v3 fp16), per policy, with the
         per-iteration mcycle array in the spare lines after the blob; the session blob is LOADed again at the end.
         The scalar parity references v0/v2s run at most BENCH_SCALAR_ITERS_MAX iterations (13-45 ms each, R33)."""
-        built = self.monitor.get(t, {}).get("l36", {}).get("variants_built", 0xF)
+        built = self.monitor.get(t, {}).get("l36", {}).get("variants_built", 0x1F)
         out = {"iters": iters, "iters_scalar": min(iters, BENCH_SCALAR_ITERS_MAX), "runs": []}
-        plan = [("fp16", (2, 3)), ("fp32_balance", (0, 1)), ("fp32_walk", (0, 1))]
+        plan = [("fp16", (2, 3, 4)), ("fp32_balance", (0, 1)), ("fp32_walk", (0, 1))]
         try:
             for which, variants in plan:
                 load = self.use_blob(t, which)
@@ -1869,7 +1871,7 @@ class Session:
 
     def parity(self, obs: np.ndarray, policies: np.ndarray, ort: Optional[np.ndarray] = None,
                variant: Optional[str] = None) -> dict:
-        """T-3.E5a: every obs through the hart vs the x86 build of the same blob (bit-identical for v0/v2) and vs the
+        """T-3.E5a: every obs through the hart vs the x86 build of the same blob (bit-identical for X86_EXACT) and vs the
         logged ORT action when given."""
         n = len(obs)
         v = {t: self.variant_for(t, variant) for t in self.tiles}
@@ -1902,7 +1904,7 @@ class Session:
                 e = np.max(np.abs(dev[m].astype(np.float64) - ort[m]), axis=1)
                 d.update(max_abs_vs_ort=float(e.max()), p999_abs_vs_ort=float(np.percentile(e, 99.9)))
             out["per_policy"][POLICIES[p]] = d
-        exact = vv in (0, 2, 3)
+        exact = vv in X86_EXACT
         out["pass"] = bool(out["per_policy"] and all(
             (x["bits_differ_vs_x86"] == 0 if exact else x["max_abs_vs_x86"] <= X86_TOL)
             and x.get("max_abs_vs_ort", 0.0) <= PARITY_TOL[dt] for x in out["per_policy"].values()))

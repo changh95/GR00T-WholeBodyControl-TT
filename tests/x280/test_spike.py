@@ -11,6 +11,9 @@ What T-3.2b asks for, and where it is checked:
     hang -> RNMI -> warm entry 10/10, the obs-CRC fault, host gone and an unknown command.
   - INFER on 1,000 logged obs516 (500 Balance + 500 Walk) per variant: v0 is bit-identical to the x86
     build's v0, and v1 (against x86 v0) and v2 (against x86 v2) are within 1e-6. v2s is checked on 64 obs.
+    v3 (the single-hart kernel: v2's arithmetic, one vector op fewer per weight) is bit-identical to x86 v2 and to
+    spike's own v2 run on the same obs, and again on crafted obs whose rows take v3's v2 fallback (|x| >= 2^16,
+    inf, NaN) or sit on its edge; those rows show the fallback in their instruction counts.
   - The stage-0 stub, the bytes of build/stage0.bin unchanged, zero-fills LIM and jumps to the entry word.
   - mon_crc32 as built for the hart (slicing-by-8 tables, R33 follow-up) against zlib: every run's `SH crc` lines
     (all lengths 0..520 plus 2,112 and 4,096 from each 8 B alignment, and a chained CRC); and a -DMON_CRC_BITWISE
@@ -54,13 +57,13 @@ OBS516_NPZ = os.environ.get(
 N_PER_POLICY = 500          # x 2 policies = the plan's 1k obs per variant
 N_V2S = 32                  # per policy; v2s is ~3.6 M instructions per INFER
 TOL_V1_V2 = 1e-6            # PLAN.md T-3.2b
-V0, V1, V2, V2S = 0, 1, 2, 3
-VNAME = {V0: "v0", V1: "v1", V2: "v2", V2S: "v2s"}
+V0, V1, V2, V2S, V3 = 0, 1, 2, 3, 4
+VNAME = {V0: "v0", V1: "v1", V2: "v2", V2S: "v2s", V3: "v3"}
 DEFAULT_TIMEOUT_S = 120.0  # wall clock per spike run (a default-script run takes < 1 s, a parity run < 30 s)
 PARITY_TIMEOUT_S = 600.0
 # Kernel instructions per INFER that the kernel lane measured on spike (VLEN 512) and that its R33
 # budget table uses; a drift beyond KERNEL_DRIFT means that table has to be re-derived.
-KERNEL_LANE_INSNS = {V0: 1_712_077, V1: 40_042, V2: 78_287, V2S: 3_588_086}
+KERNEL_LANE_INSNS = {V0: 1_712_077, V1: 40_042, V2: 78_287, V2S: 3_588_086, V3: 54_145}
 KERNEL_DRIFT = 0.15
 
 
@@ -314,16 +317,16 @@ def _infer_records(d: Path) -> list[bytes]:
 @pytest.fixture(scope="module")
 def parity(fw, blobs, logged_obs, tmp_path_factory) -> dict[tuple[int, int], dict]:
     """One spike run per (variant, policy): the default script, then SPIKE_BLOB/SPIKE_OBS/SPIKE_OUT
-    (load_blob, infer_const x4, bench x3, infer_file over the logged obs). 8 runs in parallel."""
+    (load_blob, infer_const x4, bench x3, infer_file over the logged obs). 10 runs in parallel."""
     tmp = tmp_path_factory.mktemp("spike_parity")
     obs_files = {}
     for p, o in logged_obs.items():
         obs_files[p] = tmp / f"obs_p{p}.bin"
         o.astype("<f4").tofile(obs_files[p])
     cfgs = []
-    for v in (V0, V1, V2, V2S):
+    for v in (V0, V1, V2, V2S, V3):
         for p in (0, 1):
-            blob = blobs["fp16"] if v in (V2, V2S) else blobs[f"fp32_{p}"]
+            blob = blobs["fp16"] if v in (V2, V2S, V3) else blobs[f"fp32_{p}"]
             n = N_V2S if v == V2S else N_PER_POLICY
             cfgs.append((v, p, blob, n))
     jobs = {}
@@ -397,7 +400,7 @@ def _check_default(run: Run, image_bin: bytes) -> None:
     assert b["l1"]["fw_magic"] == ml.MAGIC and b["l1"]["fw_ver"] == ml.FW_VER
     assert b["l1"]["state"] == ST["IDLE"] and b["l1"]["mhartid"] == 0 and b["l1"]["vlenb"] == 64
     assert b["l36"]["entry_flags"] & ml.ENTRY_FLAG["STUB_KERNEL"] == 0, "stub kernel linked"
-    assert b["l36"]["variants_built"] == 0b1111, hex(b["l36"]["variants_built"])
+    assert b["l36"]["variants_built"] == 0b11111, hex(b["l36"]["variants_built"])
     assert b["l36"]["mtime_hz"] == 10_000_000 and b["l36"]["misa"] >> 21 & 1
     assert b["l39"]["kind"] == ml.L39_KIND["ENTRY"] and b["l39"]["entry_kind"] == 0   # cold
     # every command step completed under its own seq, in order; L38 pokes issue no command
@@ -548,9 +551,10 @@ def _ref(x86: X86Kernel, r: dict, v: int, p: int, obs: np.ndarray) -> np.ndarray
     return x86.infer(r["blob"], p, V0 if v in (V0, V1) else V2, obs)   # x86 has no v1; v2s == v2 there
 
 
-@pytest.mark.parametrize("variant", [V0, V1, V2, V2S], ids=lambda v: VNAME[v])
+@pytest.mark.parametrize("variant", [V0, V1, V2, V2S, V3], ids=lambda v: VNAME[v])
 def test_infer_parity(variant, parity, x86):
-    """v0 and v2s bit-identical to x86 (v0 / v2); v1 and v2 within 1e-6 (PLAN.md T-3.2b)."""
+    """v0, v2s and v3 bit-identical to x86 (v0 / v2 / v2); v1 and v2 within 1e-6 (PLAN.md T-3.2b); v3 also equal to
+    spike's v2 on the same obs, bit for bit."""
     total, identical, worst = 0, 0, 0.0
     for p in (0, 1):
         r = parity[(variant, p)]
@@ -562,15 +566,17 @@ def test_infer_parity(variant, parity, x86):
         identical += int(same.sum())
         total += len(got)
         worst = max(worst, float(np.abs(got.astype(np.float64) - ref).max()))
-        if variant in (V0, V2S):
+        if variant in (V0, V2S, V3):
             assert same.all(), (VNAME[variant], p, int((~same).sum()), np.flatnonzero(~same)[:10])
         else:
             assert worst <= TOL_V1_V2, (VNAME[variant], p, worst)
+        if variant == V3:
+            assert np.array_equal(_bits(got), _bits(parity[(V2, p)]["act"][:len(got)])), p
     print(f"\nT-3.2b INFER {VNAME[variant]}: {total} obs, {identical} bit-identical to x86, max|d| {worst:.3g}")
     assert total == 2 * (N_V2S if variant == V2S else N_PER_POLICY)
 
 
-@pytest.mark.parametrize("variant", [V0, V1, V2, V2S], ids=lambda v: VNAME[v])
+@pytest.mark.parametrize("variant", [V0, V1, V2, V2S, V3], ids=lambda v: VNAME[v])
 def test_infer_const_and_bench(variant, parity, x86):
     """The default script's infer_const x4 (xorshift obs) and BENCH x3 on the same image."""
     for p in (0, 1):
@@ -583,7 +589,7 @@ def test_infer_const_and_bench(variant, parity, x86):
         for c, want in zip(consts, ref):
             got = np.array(c["l35"]["action"], np.float32)
             assert c["l1"]["state"] == ST["IDLE"] and c["l35"]["seq_echo"] == c["seq"]
-            if variant in (V0, V2S):
+            if variant in (V0, V2S, V3):
                 assert (_bits(got) == _bits(want)).all(), (VNAME[variant], p, c["sub"])
             else:
                 assert np.abs(got.astype(np.float64) - want).max() <= TOL_V1_V2
@@ -623,6 +629,10 @@ def test_instruction_counts_per_infer(parity):
         assert 0 < row["overhead_mean"] < 40_000, row   # obs copy + table CRC (bitwise: 124,305); see the report
     print("\nT-3.2b spike instructions per INFER (VLEN 512; spike cycles are instructions, not X280 cycles)")
     print("\n".join(lines))
+    for p in (0, 1):
+        if f"v3_p{p}" in report and f"v2_p{p}" in report:
+            print(f"v3/v2 kernel instructions, policy {p}: "
+                  f"{report[f'v3_p{p}']['kernel_median'] / report[f'v2_p{p}']['kernel_median']:.3f}")
     if os.environ.get("T32B_REPORT"):
         Path(os.environ["T32B_REPORT"]).write_text(json.dumps(report, indent=1) + "\n")
 
@@ -664,6 +674,76 @@ def test_crc_bitwise_build_matches_table_build(parity, crc_bitwise):
     assert rep["overhead_table"] < rep["overhead_bitwise"] / 4, rep
     if os.environ.get("T32B_CRC_REPORT"):
         Path(os.environ["T32B_CRC_REPORT"]).write_text(json.dumps(rep, indent=1) + "\n")
+
+
+def _edge_obs(n_base: int = 8) -> np.ndarray:
+    """Crafted obs for v3's guard: rows whose layer inputs reach |x| >= 2^16 (v3 then computes that layer again with
+    v2's ops), inf / NaN, values just below 2^16, subnormals and signed zeros; then n_base plain N(0,1) rows."""
+    f32 = np.float32
+    rng = np.random.default_rng(7)
+    o = rng.standard_normal((16 + n_base, 516)).astype(f32)
+    edge = [f32(65536.0), np.nextafter(f32(65536.0), f32(0)), f32(-1e5), f32(np.inf), f32(np.nan), f32(1e-45)]
+    for k, v in enumerate(edge):
+        o[k, (53 * k) % 516] = v
+    o[6] *= 3e4                     # later layers' inputs past 2^16 only
+    o[7] = 1e-40
+    o[8] = -0.0
+    o[9, 430:] = 7e4                # the newest frame feeds the actor's layer 3 directly
+    o[10] *= 1e6
+    o[11, :] = np.nextafter(f32(65536.0), f32(0))
+    o[12, 100] = f32(-3.0e38)
+    o[13] *= 1e-30
+    o[14, 431] = f32(np.inf)
+    o[15, 515] = f32(-65536.0)
+    return o
+
+
+@pytest.fixture(scope="module")
+def adversarial(fw, blobs, tmp_path_factory) -> dict[tuple[int, int], dict]:
+    """v2 and v3, both policies, on _edge_obs: 4 runs in parallel."""
+    tmp = tmp_path_factory.mktemp("spike_edge")
+    obs = _edge_obs()
+    f = tmp / "edge_obs.bin"
+    obs.astype("<f4").tofile(f)
+    jobs = {}
+    for v in (V2, V3):
+        for p in (0, 1):
+            d = tmp / f"{VNAME[v]}_p{p}"
+            _build_spike(d, SPIKE_BLOB=blobs["fp16"], SPIKE_OBS=f, SPIKE_OUT=d / "out.bin", SPIKE_N=len(obs),
+                         SPIKE_POLICY=p, SPIKE_VARIANT=v)
+            jobs[(v, p)] = d
+    with concurrent.futures.ThreadPoolExecutor(len(jobs)) as ex:
+        futs = {k: ex.submit(_spike, d / "monitor_spike.elf", x280_regions=False, timeout_s=PARITY_TIMEOUT_S)
+                for k, d in jobs.items()}
+        runs = {k: f.result() for k, f in futs.items()}
+    out = {}
+    for k, d in jobs.items():
+        recs = _infer_records(d)
+        out[k] = {"run": runs[k], "obs": obs, "blob": blobs["fp16"].read_bytes(),
+                  "act": np.array([ml.unpack_l35(r[:64])["action"] for r in recs], np.float32).reshape(-1, 15),
+                  "l1": [ml.unpack_l1(r[64:]) for r in recs]}
+    return out
+
+
+def test_v3_edge_inputs_on_spike(adversarial, x86):
+    """On rows that take v3's fallback or sit on its edge, v3 on the hart equals v2 on the hart and x86 v2 bit for
+    bit (RISC-V NaNs are canonical, so NaN rows compare too); the fallback rows cost more instructions than plain
+    rows, rows that stay below 2^16 (one input at 65535.996, subnormals, -0) do not."""
+    for p in (0, 1):
+        v2, v3 = adversarial[(V2, p)], adversarial[(V3, p)]
+        for r in (v2, v3):
+            assert r["run"].res.ok and r["run"].one("infer_file")["sub"] == len(r["obs"]), r["run"].describe()
+            assert all(l1["state"] == ST["IDLE"] and l1["mcause"] == 0 for l1 in r["l1"])
+        assert np.array_equal(_bits(v3["act"]), _bits(v2["act"])), p
+        ref = x86.infer(v3["blob"], p, V2, v3["obs"])
+        fin = np.isfinite(ref).all(axis=1)
+        assert np.array_equal(_bits(v3["act"][fin]), _bits(ref[fin])), p
+        assert (~fin).any() and np.isnan(v3["act"][~fin]).any()
+        k = np.array([l1["cycles_last"] for l1 in v3["l1"]], np.int64)
+        plain = int(np.median(k[16:]))
+        assert (k[16:] == plain).all() and (k[[1, 5, 7, 8, 13]] == plain).all()   # |x| < 2^16 everywhere
+        assert (k[[0, 2, 3, 4, 6, 9, 10, 15]] > plain).all(), k                 # fallback in one or more layers
+        print(f"\nv3 edge rows, policy {p}: plain {plain:,} instructions, fallback rows {sorted(set(k[k > plain]))}")
 
 
 # --- harts 1-3 on spike -p4 (x280/fw/mh.h, mh.c, mh_bench.c; SPIKE_HOST.md "Multi-hart script") ------------------------

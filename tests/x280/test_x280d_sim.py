@@ -529,7 +529,7 @@ def test_boot_refuses_a_spent_ledger_tile(hold):
 def test_serve_sim_fp16_contract_and_bit_parity(daemon):
     d = daemon()
     info = d.rpc("info")
-    assert info["backend"] == "x280-sim:v2-fp16" and info["proto"] == 2 and info["mode"] == "booted"
+    assert info["backend"] == "x280-sim:v3-fp16" and info["proto"] == 2 and info["mode"] == "booted"
     assert sorted(info["policies"]) == [BAL, WALK] and info["boot_parity"]["pass"]
     assert info["parity_tol"] == 1e-2 and info["compute_us_src"] == "host_turnaround"
     ref = _ref(D.BLOB_FP16)
@@ -873,7 +873,7 @@ def test_via_admin_subcommands(daemon):
     assert st["pass"] and st["lines"] == regs.LIM_LINES
     r = subprocess.run(NICE + [PY, str(X280D), "ping", "--via", d.url], cwd=RT, env=env, capture_output=True,
                        text=True, timeout=30)
-    assert r.returncode == 0 and json.loads(r.stdout)["info"]["backend"] == "x280-sim:v2-fp16"
+    assert r.returncode == 0 and json.loads(r.stdout)["info"]["backend"] == "x280-sim:v3-fp16"
     r = subprocess.run(NICE + [PY, str(X280D), "lim-init", "--via", d.url], cwd=RT, env=env, capture_output=True,
                        text=True, timeout=30)
     assert r.returncode == 1 and "no-release" in r.stdout
@@ -993,7 +993,7 @@ def test_e2_heartbeat_e3_powertest_e4_matrix_e5_blob_switch(hold):
         assert [c[0] for c in s.k.backend.calls].count("open") == 4  # keeper + 3 legacy churn opens
         m = s.bench_matrix(3, iters=20)
         got = {(r["blob"], r["variant"], r["policy"]) for r in m["runs"]}
-        assert ("fp16", "v2", BAL) in got and ("fp16", "v2s", WALK) in got
+        assert ("fp16", "v2", BAL) in got and ("fp16", "v2s", WALK) in got and ("fp16", "v3", WALK) in got
         assert ("fp32_balance", "v0", BAL) in got and ("fp32_walk", "v0", WALK) in got
         assert all(r["rc"] == 0 and r["nondet"] == 0 and r["iters"] == 20 for r in m["runs"])
         assert s.blobs[3]["dtype"] == "fp16" and s.check_parity()["pass"]  # the session blob is back
@@ -1005,7 +1005,12 @@ def test_e2_heartbeat_e3_powertest_e4_matrix_e5_blob_switch(hold):
         assert r["pass"] and list(r["per_policy"]) == [WALK] and r["n_served"] == 8
         with pytest.raises(D.X280Error, match="needs fp16"):
             s.parity(obs, pol, variant="v2")
+        with pytest.raises(D.X280Error, match="needs fp16"):
+            s.parity(obs, pol, variant="v3")
         s.use_blob(3, "session")
+        r = s.parity(obs, pol, variant="v3")  # bit-identical to x86 v2 (X86_FAMILY), both policies
+        assert r["pass"] and r["variant"] == "v3" and r["n_served"] == 16
+        assert all(x["bits_differ_vs_x86"] == 0 for x in r["per_policy"].values())
     finally:
         s.close()
 
@@ -1261,7 +1266,7 @@ def test_bench_pilot_deadline_scalar_cap_and_quiesce_before_load(hold, monkeypat
         assert r["pilot"]["iters"] == D.BENCH_PILOT_ITERS and r["pilot"]["deadline_s"] >= 10.0 and r["iters"] == 40
         monkeypatch.setattr(D, "BENCH_SCALAR_ITERS_MAX", 12)
         m = s.bench_matrix(3, iters=30)
-        assert {(x["variant"], x["iters"]) for x in m["runs"]} == {("v2", 30), ("v2s", 12), ("v0", 12)}
+        assert {(x["variant"], x["iters"]) for x in m["runs"]} == {("v2", 30), ("v2s", 12), ("v3", 30), ("v0", 12)}
         mb = s.mb[3]
         with s.batch(3):
             seq = mb.issue(ml.CMD["BENCH"], policy=0, flags=ml.variant_flags(2), arg_len=4000,
@@ -1353,7 +1358,7 @@ def test_status_pub_contract_on_the_fake_device(monkeypatch, hold):
         assert m["tile"] == 3 and m["tile_state"] == "released" and m["monitor_state"] == "idle"
         assert m["n_runs"] >= 60 and m["n_reentry"] == 0 and m["beu_accrued"] == 0 and m["n_overrun"] == 0
         assert m["seq_done"] == s.mb[3].seq and m["fw_ver"] == ml.FW_VER and m["build_id"] == s.monitor[3]["l36"]["build_id"]
-        assert m["variant"] == "v2" and m["ccache_ecc"] == {"fix": 0, "fail": 0}
+        assert m["variant"] == "v3" and m["ccache_ecc"] == {"fix": 0, "fail": 0}
         assert m["compute_us_last"] > 0 and 0 < m["duty"] < 1 and m["heartbeat_age_us"] is not None
         tel = m["telemetry"]
         assert m["telemetry_source"] == D.TELEMETRY_SOURCE_TEST == srv.info()["telemetry_source"]

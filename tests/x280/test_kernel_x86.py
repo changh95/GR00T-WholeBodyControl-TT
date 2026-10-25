@@ -7,9 +7,13 @@ Balance and Walk both run on every logged obs516 of an M1 VL run (10,080 ticks, 
 provider with one thread (the loop's OrtCpu "single"):
   v0  fp32 weights   max|da| <= 5e-5
   v2  fp16 weights   max|da| <= 1e-2   (v2s must equal v2 bit for bit)
+  v3  fp16 weights   equal to v2 bit for bit on every input above, on inputs that send rows to its
+                     v2 fallback (|x| >= 2^16, inf, NaN) and on subnormal / signed-zero inputs; its
+                     product w' * (x * 2^112) equals v2's (w' * 2^112) * x for every finite fp16 weight
+                     and every |x| < 2^16 tried (and fails at 2^16, which is why the fallback exists)
 Also: the exact graph, the blob format and every error code, CRC-32 vs zlib, the fp16 widening on
-all 65,536 patterns, expf/ELU accuracy, and that the riscv objects have no undefined symbols and
-no Zvfh instructions.
+all 65,536 patterns, expf/ELU accuracy, and that the riscv objects have no undefined symbols, no
+Zvfh instructions and no vector register spills in v3's GEMV.
 
   simpy -m pytest $RT/tests/x280/test_kernel_x86.py -q
 
@@ -24,6 +28,7 @@ import ctypes
 import importlib.util
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import zlib
@@ -39,7 +44,7 @@ N_RANDOM = 256
 TOL_FP32 = 5e-5
 TOL_FP16 = 1e-2
 SCRATCH_BYTES = 4096
-V0, V1, V2, V2S = 0, 1, 2, 3
+V0, V1, V2, V2S, V3 = 0, 1, 2, 3, 4
 EINVAL, EMAGIC, EVERSION, ESIZE, ECRC, ELAYOUT, EPOLICY, EVARIANT, EDTYPE = range(-1, -10, -1)
 # Off the real-time cores 2,3,4,6,7,12-15 and their SMT siblings (task rule; override with X280_CPUS).
 X280_CPUS = os.environ.get("X280_CPUS", "0,1,8-11,16,17,24-27")
@@ -237,6 +242,73 @@ def test_fp16_kernel_is_exact_on_its_weights(blobs, inputs, policy):
     assert err.max() <= 2e-5, err.max()
 
 
+@pytest.mark.parametrize("policy", [0, 1], ids=POLICIES)
+def test_fp16_v3_is_v2_bit_for_bit(blobs, inputs, policy):
+    """v3 moves v2's exact 2^112 weight scale onto x[i]: the same bits on all 10,080 logged obs + 256 N(0,1)."""
+    want = blobs["fp16"].infer(policy, V2, inputs)
+    got = blobs["fp16"].infer(policy, V3, inputs)
+    same = (got.view(np.uint32) == want.view(np.uint32)).all(axis=1)
+    print(f"\n{POLICIES[policy]} v3 vs v2: {int(same.sum())}/{len(same)} rows bit-identical")
+    assert same.all(), np.flatnonzero(~same)[:10]
+
+
+def _adversarial_obs() -> np.ndarray:
+    """Rows whose layer inputs cross v3's |x| < 2^16 guard (its v2 fallback) or sit on its edge."""
+    f32 = np.float32
+    rng = np.random.default_rng(5)
+    base = rng.standard_normal((40, 516)).astype(f32)
+    edge = [f32(65536.0), np.nextafter(f32(65536.0), f32(0)), -f32(65536.0), f32(1e5), f32(np.inf), -f32(np.inf),
+            f32(np.nan), f32(3.4028235e38), f32(1e-45), f32(1.1754944e-38), f32(-0.0)]
+    for k, v in enumerate(edge):
+        base[k, (37 * k) % 516] = v               # one input on the edge, everything else ordinary
+        base[k + len(edge), 430 + k] = v          # the same in the newest frame (it also feeds the actor directly)
+    base[22] *= 1e4                               # hidden activations past 2^16 in later layers only
+    base[23] *= 3e4
+    base[24] *= 1e6
+    base[25] = 1e-40                              # all subnormal
+    base[26] = -0.0
+    base[27] = 0.0
+    base[28] *= 1e-30
+    base[29, :] = np.nextafter(f32(65536.0), f32(0))
+    base[30, ::2] = f32(70000.0)
+    return base
+
+
+@pytest.mark.parametrize("policy", [0, 1], ids=POLICIES)
+def test_fp16_v3_is_v2_bit_for_bit_on_adversarial_inputs(blobs, policy):
+    obs = _adversarial_obs()
+    want = blobs["fp16"].infer(policy, V2, obs)
+    got = blobs["fp16"].infer(policy, V3, obs)
+    assert np.array_equal(got.view(np.uint32), want.view(np.uint32))   # NaN payloads included
+    assert np.isnan(got).any() and np.isfinite(got[:4]).all()          # both kinds of row are exercised
+
+
+def test_v3_product_identity():
+    """The identity v3 rests on, in float32 numpy (IEEE RNE, no FTZ): for every finite fp16 weight w, with w' its
+    bit pattern scaled by 2^-112 (wbc_mlp.c h2f before the scale), RN(w' * RN(x * 2^112)) == RN(RN(w' * 2^112) * x)
+    for |x| < 2^16 (subnormal x and signed zeros included), and not for x = 2^16: the guard is tight."""
+    f32 = np.float32
+    h = np.arange(65536, dtype=np.uint32)
+    h = h[np.isfinite(h.astype(np.uint16).view(np.float16))]
+    u = ((h.astype(np.int16).astype(np.int32).view(np.uint32) << 13) & np.uint32(0x8FFFFFFF)).astype(np.uint32)
+    wp = u.view(f32)                                             # w' (often an fp32 subnormal)
+    w = wp * f32(2.0 ** 112)
+    assert np.array_equal(w, h.astype(np.uint16).view(np.float16).astype(f32))   # v2's first multiply is exact
+    rng = np.random.default_rng(6)
+    mags = np.exp2(rng.uniform(-149, 16, 3000)).astype(f32)
+    xs = np.concatenate([mags, -mags, rng.standard_normal(500).astype(f32),
+                         [f32(0.0), f32(-0.0), f32(1e-45), f32(-1e-45), f32(1.1754942e-38),
+                          np.nextafter(f32(65536.0), f32(0)), -np.nextafter(f32(65536.0), f32(0))]]).astype(f32)
+    xs = xs[np.abs(xs) < f32(65536.0)]
+    with np.errstate(all="ignore"):
+        for xb in np.array_split(xs, 16):
+            v2 = w[:, None] * xb[None, :]
+            v3 = wp[:, None] * (xb * f32(2.0 ** 112))[None, :]
+            assert np.array_equal(v2.view(np.uint32), v3.view(np.uint32))
+        x = f32(65536.0)
+        assert not np.array_equal((w * x).view(np.uint32), (wp * (x * f32(2.0 ** 112))).view(np.uint32))
+
+
 def test_fp16_widening_all_patterns(lib):
     h = np.arange(65536, dtype=np.uint16)
     finite = np.isfinite(h.view(np.float16))
@@ -323,11 +395,13 @@ def test_infer_error_codes(lib, blobs):
         return lib.wbc_infer(blob.ptr, policy, variant, obs.ctypes.data if o is None else o,
                              act.ctypes.data if a is None else a, sc)
 
-    assert lib.wbc_variants_built() == 0b1101            # x86: v0, v2, v2s; no RVV
+    assert lib.wbc_variants_built() == 0b11101           # x86: v0, v2, v2s, v3; no RVV
     assert run(b32, 0, V1) == EVARIANT
     assert run(b32, 0, 9) == EVARIANT
+    assert run(b32, 0, 5) == EVARIANT
     assert run(b16, 0, V0) == EDTYPE
     assert run(b32, 0, V2) == EDTYPE
+    assert run(b32, 0, V3) == EDTYPE
     assert run(b32, 1, V0) == EPOLICY                    # fp32 Balance-only blob (DP4)
     assert run(b16, 2, V2) == EPOLICY
     assert run(b16, 0, V2, o=obs.ctypes.data + 2) == EINVAL
@@ -393,6 +467,16 @@ def test_rv64_objects_are_freestanding(build):
     assert not [m for m in mnem if m.startswith(("vfwcvt", "vfncvt", "fcvt.s.h", "fcvt.h.s"))]  # no Zvfh/Zvfhmin
     assert not [m for m in mnem if m.startswith(("fmadd", "fmsub", "fnmadd", "fnmsub", "vfmacc", "vfmadd"))]
     assert "vle16.v" in mnem and "vwmul.vx" in mnem and "vfadd.vv" in mnem
+    # v3's GEMV keeps all 32 vector registers busy: a spill would be an uncached LIM round trip per row
+    v3, inside = [], False
+    for ln in dis.splitlines():
+        head = re.match(r"^[0-9a-f]+ <([^>]+)>:$", ln)
+        if head and not head[1].startswith(".L"):
+            inside = head[1] == "gemv_f16_v3"
+        elif inside:
+            v3.append(ln)
+    assert not [ln for ln in v3 if re.search(r"\bv[ls][1248]r\.v\b|\bv[ls]e\d+\.v\s.*\(sp\)", ln)]
+    assert sum("vwmul.vx" in ln for ln in v3) >= 8 and not [ln for ln in v3 if "vfmacc" in ln]
     size = subprocess.run([shutil.which("llvm-size-20") or "llvm-size", str(kobj)], capture_output=True, text=True,
                           check=True).stdout.splitlines()[1].split()
     text, data, bss = map(int, size[:3])

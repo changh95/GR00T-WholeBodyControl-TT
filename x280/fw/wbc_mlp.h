@@ -16,6 +16,8 @@
  * multiply and add rounded separately (RNE, no fused multiply-add, -ffp-contract=off), so v0 on
  * x86 == v0 on riscv == v1 bit for bit, and v2 on x86 == v2 on riscv bit for bit. The hart must run
  * with frm = 0 (round to nearest even) and must not flush subnormals (RISC-V never does).
+ * v3 == v2 bit for bit on every input: it rounds the same product w*x[i] and the same sums in the
+ * same order, and only moves v2's exact 2^112 weight scale onto x[i] when |x[i]| < 2^16 (wbc_mlp.c).
  */
 #ifndef WBC_MLP_H
 #define WBC_MLP_H
@@ -41,7 +43,12 @@ int wbc_infer(const void *blob, uint32_t policy, uint32_t variant,
 /* Scalar fp16 path on every build. On x86 WBC_VARIANT_V2 is this same code; on riscv V2 is the RVV
  * column-broadcast kernel and V2S is the scalar timing point for E4. Bit-identical to V2. */
 #define WBC_VARIANT_V2S 3
-#define WBC_N_VARIANTS 4
+/* fp16, bit-identical to V2 on every input, with one vector op fewer per weight: V2's exact 2^112
+ * scale rides on x[i] (one scalar multiply per row) when |x[i]| < 2^16, else V2's ops are used (x86:
+ * for that row; riscv: that layer is computed again by V2). riscv: e32m8 GEMV in asm with the next
+ * row's weights and x[i+1] loaded a row ahead (wbc_mlp.c); x86: the same arithmetic in scalar code. */
+#define WBC_VARIANT_V3 4
+#define WBC_N_VARIANTS 5
 
 /* Return codes (all < 0). wbc_infer never writes act on an error. */
 #define WBC_OK        0
@@ -53,7 +60,7 @@ int wbc_infer(const void *blob, uint32_t policy, uint32_t variant,
 #define WBC_ELAYOUT  -6   /* hdr_bytes, layout, n_layers, dims, alignment or overlap mismatch */
 #define WBC_EPOLICY  -7   /* policy out of range or not present in the blob */
 #define WBC_EVARIANT -8   /* variant unknown or not built for this target */
-#define WBC_EDTYPE   -9   /* variant needs the other weight dtype (v0/v1: fp32, v2/v2s: fp16) */
+#define WBC_EDTYPE   -9   /* variant needs the other weight dtype (v0/v1: fp32, v2/v2s/v3: fp16) */
 
 /* Weight blob v1 (written by x280/tools/pack_weights.py; little-endian; placed at WBC_BLOB_BASE).
  * Every array is 64 B aligned relative to the blob start. Weights are stored transposed,
@@ -100,7 +107,7 @@ typedef struct {
 _Static_assert(sizeof(wbc_layer_t) == 16, "wbc_layer_t");
 _Static_assert(sizeof(wbc_blob_hdr_t) == WBC_BLOB_HDR_BYTES, "wbc_blob_hdr_t");
 
-/* Bitmask of the variants this build can run (bit v = variant v): x86 0b1101, riscv+V 0b1111. */
+/* Bitmask of the variants this build can run (bit v = variant v): x86 0b11101, riscv+V 0b11111. */
 uint32_t wbc_variants_built(void);
 
 /* zlib-compatible CRC-32 (bitwise, no table: a table in LIM would be uncached anyway). Start with

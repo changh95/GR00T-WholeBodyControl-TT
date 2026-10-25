@@ -7,18 +7,21 @@
 #
 # The session x280d booted with --stage0 (the standard E1F boot since 2026-10-25) or --boot; the job reads neither.
 #
-#   1  BENCH matrix: every built variant on its weight dtype (v0/v1 fp32 one policy per blob, v2/v2s fp16 both),
+#   1  BENCH matrix: every built variant on its weight dtype (v0/v1 fp32 one policy per blob, v2/v2s/v3 fp16 both),
 #      E4_ITERS (1000) INFERs each, the scalar parity references v0/v2s at most 100 (15-45 ms per call), mcycle per
 #      iteration into the spare LIM lines after the blob (x280d bench --matrix). Each BENCH's deadline is 3x a
 #      10-iteration pilot, and a timed-out BENCH is finished or RNMI-parked before the next LOAD (review F9).
 #      Compare the cycles with the spike instruction counts per inference (kernel lane: v0 1.712M, v1 40.0K,
-#      v2 78.3K, v2s 3.588M at VLEN 512) to separate stalls from issue, and re-derive the budget with E2m's
+#      v2 78.3K, v2s 3.588M, v3 54.1K at VLEN 512) to separate stalls from issue, and re-derive the budget with E2m's
 #      measured uncached latency c in x280/R33_ESTIMATE.md (formulas and break-even c per gate there).
 #      The -DWBC_RVV_FMA build is a timing data point only (it fails the E5a limit).
+#      v3 (fp16, bit-identical to v2, one vector op fewer per weight; x280/R33_ESTIMATE.md "v3") is measured on the
+#      same blob and obs as v2: e4_choice.json `v3_vs_v2` gives cyc_min per policy, v3/v2 and the model's range.
+#      The session default stays v2 until this and E5a (jobs/e5_parity.sh, run v3_fp16) pass on silicon.
 #   2  Mailbox RTT through x280d with the VLA idle, then with bench_g1 keeping server_g1 busy (x280d bench --rtt,
 #      its client placed as rt_sim's tick thread: jobs/_x280.sh x280_rtt_client_args, X280_RTT_CLIENT_CPUS=2,3).
 #      Their `pass` is PLAN T-3.5's x280d-side verdict (recorded here, gated in jobs/m3_rtt.sh).
-#   3  e4_choice.json: per variant the worst p99 over policies; targets compute p99 <= 1.0 ms (v1/v2), gate <= 2.0 ms
+#   3  e4_choice.json: per variant the worst p99 over policies; targets compute p99 <= 1.0 ms (v1/v2/v3), gate <= 2.0 ms
 #      (m3_rt), <= 8.0 ms (m3_rt_slow, DP11); v0 is a parity reference (recorded, not gated).
 # Not implemented: option E4c (stack + activations in a Zero-Device pinned L3 way via CCACHE0_WAYMASK0) - it needs a
 # firmware build with a different stack placement.
@@ -58,6 +61,15 @@ def rtt(n):
         return {}
 idle, busy = rtt("e4_rtt_idle.json"), rtt("e4_rtt_busy.json")
 cands = {k: v for k, v in worst.items() if not k.startswith("v0")}
+# v3 vs v2 on the fp16 blob, same obs (x280/R33_ESTIMATE.md "v3": 225-251 K cycles predicted, v2 307.9 K on S3)
+V3_MODEL_CYC = (225_000, 251_000)
+fp16 = {(r["variant"], r["policy"]): r for r in m.get("runs", []) if r.get("dtype") == "fp16" and r.get("cyc_min")}
+v3_vs_v2 = {}
+for (v, pol), r in sorted(fp16.items()):
+    if v == "v3" and ("v2", pol) in fp16:
+        a, b = fp16[("v2", pol)]["cyc_min"], r["cyc_min"]
+        v3_vs_v2[pol] = {"v2_cyc_min": a, "v3_cyc_min": b, "v3_over_v2": round(b / a, 4),
+                         "in_model_range": V3_MODEL_CYC[0] <= b <= V3_MODEL_CYC[1]}
 best = min(cands, key=cands.get) if cands else None
 tier = None
 if best is not None:
@@ -65,6 +77,7 @@ if best is not None:
     tier = "target (<= 1.0 ms)" if p <= 1000 else "m3_rt (<= 2.0 ms)" if p <= 2000 else \
         "m3_rt_slow (<= 8.0 ms, DP11 + early dispatch)" if p <= 8000 else "shadow only (> 8 ms, DP11)"
 out = {"compute_p99_us_by_variant": worst, "recommended": best, "tier": tier,
+       "v3_vs_v2": v3_vs_v2 or None, "v3_model_cycles": list(V3_MODEL_CYC),
        "rtt_idle_us": idle.get("rtt_us"), "rtt_busy_us": busy.get("rtt_us"),
        "host_overhead_idle_us": idle.get("host_overhead_us"), "host_overhead_busy_us": busy.get("host_overhead_us"),
        "x280d_idle_us": idle.get("x280d_us"), "x280d_busy_us": busy.get("x280d_us"),
