@@ -10,7 +10,7 @@ Faults (flags, or FAKE_G1_* in the environment because chip_session.sh builds th
   --device-ms D, --slow-every K --slow-ms S   simulated device time
   --boot-s T, --die-before-ready, --ignore-term (chip_session's SIGKILL escalation)
   --status-pub URL     a 5 Hz status PUB with server_g1's src/seq/calls/backend keys (bench_g1 --status-sub)
-  --info-json JSON     extra INFO keys (FAKE_G1_INFO), e.g. a GPU VLA stand-in's model / revision / noise
+  --info-json JSON     extra INFO keys (FAKE_G1_INFO), e.g. model / revision
 Never binds 5555-5572 (the tests pass a free port).
 
     python fake_g1_server.py --port P [--debug-endpoints] [--log FILE] [--events FILE] [faults]
@@ -107,8 +107,6 @@ class FakeG1:
         ms = acts.pop("_ms")
         info = {"rt": rt, "t_recv_ns": t_recv, "t_reply_ns": time.monotonic_ns(), "noise_seed": seed,
                 "backend": "fake:tt", "tree": "fake", **ms}
-        if seed is not None and self.a.info.get("noise") == "cpu":  # as gpu_vla_server --noise cpu replies
-            info.update(noise="cpu", randn_calls=1)
         info["infer_ms"] = (info["t_reply_ns"] - t_recv) / 1e6
         return [acts, info]
 

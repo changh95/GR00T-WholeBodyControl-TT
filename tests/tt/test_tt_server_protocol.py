@@ -32,8 +32,9 @@ from rttt import server_g1 as S
 RT = Path(__file__).resolve().parents[2]
 RESERVED_PORTS = range(5555, 5573)  # PLAN.md D15: never bound by tests
 
-# The 13 keys the stock rollout sends beyond the 9 W-VLA keys (22 in all), as recorded by tests/official_arm.py's
-# PolicyTap on the first request of seed 1 (scratchpad pt_gpu/official_equiv0/official_seed1.json "first_obs").
+# The 13 keys the stock rollout sends beyond the 9 W-VLA keys (22 in all), as recorded by T-1.3's PolicyTap
+# (tests/official_arm.py, now at tag gpu-baselines) on the first request of seed 1 (scratchpad
+# pt_gpu/official_equiv0/official_seed1.json "first_obs").
 # PLAN.md §1.4.1 says 12; the recording has 13 (video.tpp_view included).
 STOCK_EXTRA = {
     "ddq": ("float32", (1, 1, 43)), "dq": ("float32", (1, 1, 43)), "ego_view_image": ("float32", (1, 1, 480, 640, 3)),
@@ -302,52 +303,6 @@ def test_predict_debug_matches_get_action(dbg, g1, obs_factory):
     assert "error" in peek and "real device" in peek["error"]
 
 
-def test_gpu_vla_server_cpu_noise_is_server_g1s_draw(tmp_path, obs_factory, monkeypatch):
-    """verify:all D3 (review:tt #8): for the loop's --crn noise_seeds, the noise server_g1 hands its model (the fake
-    model, captured at predict_normalized) is bit-identical to rtserve/gpu_vla_server.py --noise cpu's draw for the
-    N1.6 action head's one ``torch.randn(size=(B, action_horizon, max_action_dim), dtype=<model dtype>)``: equal in
-    fp32 before the cast and equal after the cast to the dtype the DiT asks for (shape and dtype from the DP1
-    checkpoint's config.json, gr00t_n1d6.py:310-314). server_g1 reports the mode as info.noise."""
-    from rtloop.loop import noise_seed
-    from rtserve import gpu_vla_server as gv
-    from rttt.convert_bf16 import DEFAULT_SRC
-
-    cfg_path = Path(DEFAULT_SRC) / "config.json"
-    if not cfg_path.exists():
-        pytest.skip(f"no DP1 snapshot at {DEFAULT_SRC}")
-    cfg = json.loads(cfg_path.read_text())
-    shape, dtype = (1, cfg["action_horizon"], cfg["max_action_dim"]), getattr(torch, cfg["model_dtype"])
-    assert shape == S.FakeG1Model().noise_shape and dtype == torch.bfloat16
-    seen = []
-    orig = S.FakeG1Model.predict_normalized
-
-    def capture(self, mi, noise):
-        seen.append(noise.detach().clone())
-        return orig(self, mi, noise)
-
-    monkeypatch.setattr(S.FakeG1Model, "predict_normalized", capture)
-    r = Running(tmp_path)
-    draws = []
-    try:
-        assert r.call("info")["noise"] == gv.NOISE_MODES[1] == "cpu"
-        for i, seed in enumerate([noise_seed(2000, k) for k in range(3)] + [0, 2**64 - 1]):
-            seen.clear()
-            get_action(r, obs_factory(30 + i), {"rt": rt(i + 1, noise_seed=seed)})
-            (tt,) = seen
-            assert tuple(tt.shape) == shape and tt.dtype == torch.float32
-            with gv.SeededNoise(seed) as sn:
-                head = torch.randn(size=shape, dtype=dtype, device="cpu")  # the action head's call, on cpu here
-            with gv.SeededNoise(seed):
-                fp32 = torch.randn(shape)
-            assert sn.calls == 1 and head.dtype == dtype
-            assert torch.equal(fp32, tt) and fp32.numpy().tobytes() == tt.numpy().tobytes(), seed
-            assert torch.equal(head, tt.to(dtype)), seed
-            draws.append(tt)
-        assert not any(torch.equal(a, b) for i, a in enumerate(draws) for b in draws[i + 1:])  # seed -> draw
-    finally:
-        r.stop()
-
-
 def test_jsonl_log(tmp_path, obs_factory):
     r = Running(tmp_path)
     try:
@@ -494,7 +449,7 @@ def test_cli_boot_check_failure_exits_2(tmp_path):
 
 
 def test_abandoned_request_is_answered_stale_without_inference(srv, obs_factory):
-    """As rtserve/gpu_vla_server.py:120-128: a request received after the client's give-up gets {"error": "stale"}
+    """As rtserve/mock_vla_server.py: a request received after the client's give-up gets {"error": "stale"}
     and runs no inference; a fresh request with the same stamps is served."""
     now = time.monotonic_ns()
     old = rt(5, t_send_ns=now - 2_000_000_000, give_up_ms=500)

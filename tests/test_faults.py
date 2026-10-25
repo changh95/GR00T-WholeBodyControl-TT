@@ -6,8 +6,8 @@ ports, short episodes) run concurrently, each under tests/guard_probe.py (the lo
 and restarts only servers it started itself (SIGKILL through their Popen objects):
 
   stall     the mock's 14th get_action (seq 14, k_obs 208) sleeps 2 s (--stall-after 13 --stall-s 2)
-  wbc_kill  --wbc on rtserve.wbc_gpu_server (srvpy, a random port); SIGKILL at about tick 150 of
-            episode 0, restarted on the same port at once; 3 episodes
+  wbc_kill  --wbc on x280d serve --backend sim (the W-WBC server of demo.sh --x280-sim, a random port);
+            SIGKILL at about tick 150 of episode 0, restarted on the same port at once; 3 episodes
   vla_kill  SIGKILL of the mock at about tick 100 of episode 0, restarted on the same port 2.5 s later
   jump      tests/fault_mock.py answers every episode-0 request with k_obs >= 100 with arm rows =
             state + 1.5 rad: the arm PD turns the step into a joint speed above the safety monitor's
@@ -261,7 +261,7 @@ def test_wbc_killed_ort_on_the_same_tick_then_latched(faults, capsys):
     before = t0["t_end_ns"] < ev["wbc_kill_ns"]
     after = t0["t_start_ns"] > ev["wbc_dead_ns"]
     assert before.sum() > 100 and after.sum() > 100
-    assert (t0["wbc_be"][before] == WbcBackend.OTHER).all() and (t0["wbc_fb"][before] == 0).all()
+    assert (t0["wbc_be"][before] == WbcBackend.X280_SIM).all() and (t0["wbc_fb"][before] == 0).all()
     assert (t0["wbc_fb"][after] == 1).all() and (t0["wbc_be"][after] == WbcBackend.ORT).all()
     fb = np.nonzero(t0["wbc_fb"])[0]
     k_miss = int(fb[0])
@@ -293,13 +293,13 @@ def test_wbc_reconnects_after_restart(faults, capsys):
         te = t[t["ep"] == e["ep"]]
         assert int(te["t_start_ns"][0]) > ev["wbc_ready_ns"], "episode started before the restart was ready"
         assert e["wbc_reset_ping"] is True and e["n_fallback"] == 0
-        assert (te["wbc_be"] == WbcBackend.OTHER).all() and (te["wbc_fb"] == 0).all()
-        assert float(np.nanmax(te["shadow_da"])) < 1e-4  # the restarted server serves the same MLPs
+        assert (te["wbc_be"] == WbcBackend.X280_SIM).all() and (te["wbc_fb"] == 0).all()
+        assert float(np.nanmax(te["shadow_da"])) < 1e-2  # the restarted server serves the same MLPs (fp16 bound)
     assert int(t["slip"].sum()) == 0
     restart_s = (ev["wbc_ready_ns"] - ev["wbc_dead_ns"]) / 1e9
     with capsys.disabled():
         print(f"\n[T-1.6 wbc] restarted in {restart_s:.2f} s; episodes "
-              f"{[e['ep'] for e in later]} reconnected (reset ping ok, 0 fallbacks, GPU on every tick)")
+              f"{[e['ep'] for e in later]} reconnected (reset ping ok, 0 fallbacks, x280d sim on every tick)")
 
 
 # --- VLA server killed --------------------------------------------------------------------------

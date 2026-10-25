@@ -66,11 +66,11 @@ def golden_obs(sid: str) -> dict:
 # --- 1. abandoned requests (schema.request_abandoned) -----------------------------------------------------------
 
 
-def test_abandoned_request_is_skipped_like_gpu_vla_server():
-    """gpu_vla_server.py:120-128 and mock_vla_server.py:277-279 answer a request whose client already gave up
-    (options.rt t_send_ns + give_up_ms before the receive stamp) with {"error": "stale ..."} and no inference, so
-    requests abandoned during an outage do not each cost a full inference ahead of the live one. server_g1 must
-    behave the same on the M2 path (same VlaClient, same give_up_ms)."""
+def test_abandoned_request_is_skipped_like_the_mock():
+    """mock_vla_server.py answers a request whose client already gave up (options.rt t_send_ns + give_up_ms before
+    the receive stamp) with {"error": "stale ..."} and no inference, so requests abandoned during an outage do not
+    each cost a full inference ahead of the live one. server_g1 must behave the same on the M2 path (same VlaClient,
+    same give_up_ms)."""
     model = S.FakeG1Model()
     srv = Served(model, debug=False)
     try:

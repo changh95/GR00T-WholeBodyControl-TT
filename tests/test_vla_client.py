@@ -402,7 +402,7 @@ def test_request_abandoned_rule():
 
 def test_server_skips_requests_the_client_abandoned(server_factory, client_factory):
     """After a give-up the abandoned request still sits in the server's REP queue. The mock (like
-    gpu_vla_server) answers it at once with a stale error, so the live request waits only for the
+    server_g1) answers it at once with a stale error, so the live request waits only for the
     one being computed, not for every abandoned one as well."""
     srv = server_factory("hold", latency_ms=250)
     c = client_factory(srv.url, give_up_ms=100)
@@ -419,25 +419,6 @@ def test_server_skips_requests_the_client_abandoned(server_factory, client_facto
     assert info["n_stale"] == 1 and info["n_get_action"] == 2
     assert r.rtt_ms < 450, r.rtt_ms  # ~290 ms; serving seq 2 too would add its 250 ms
     print(f"\n[measure] live request after 2 give-ups: {r.rtt_ms:.0f} ms (1 stale request skipped)")
-
-
-def test_gpu_vla_server_rejects_abandoned_request_without_inference():
-    from rtserve import gpu_vla_server as gvs
-
-    class Policy:
-        calls = 0
-
-        def get_action(self, observation, options=None):
-            Policy.calls += 1
-            return {"action.x": np.zeros((1, H, 1), np.float32)}, {}
-
-    srv = object.__new__(gvs.RtPolicyServer)  # the handler only; no socket, no gr00t import
-    srv.policy, srv.backend, srv.log, srv.n_stale = Policy(), "cuda:test", None, 0
-    srv.t_recv_ns = 10**9 + 600_000_000
-    out = srv.get_action({}, {"rt": {"seq": 4, "t_send_ns": 10**9, "give_up_ms": 500}})
-    assert isinstance(out, dict) and "stale" in out["error"] and Policy.calls == 0 and srv.n_stale == 1
-    out = srv.get_action({}, {"rt": {"seq": 5, "t_send_ns": 10**9 + 550_000_000, "give_up_ms": 500}})
-    assert isinstance(out, list) and Policy.calls == 1 and out[1]["rt"]["seq"] == 5
 
 
 # --- drain --------------------------------------------------------------------------------------

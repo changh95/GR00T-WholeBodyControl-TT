@@ -20,8 +20,7 @@ import numpy as np
 from loop_utils import R, RT, load_run
 
 RESERVED_PORTS = range(5555, 5573)
-SRV_PYTHON = os.environ.get("SRV_PYTHON", str(R / ".venv/bin/python"))
-SIM_ENV_KEYS = ("CUDA_VISIBLE_DEVICES", "MUJOCO_GL", "MUJOCO_EGL_DEVICE_ID")
+XPY = RT / ".venv-x280" / "bin" / "python"  # what env.sh's xpy runs
 
 
 def free_port() -> int:
@@ -80,17 +79,18 @@ def kill9(proc: subprocess.Popen, timeout_s: float = 10) -> None:
 
 
 class WbcServer:
-    """rtserve.wbc_gpu_server under the server venv (what `srvpy -m ...` runs) on a given port."""
+    """x280d on its mailbox sim, the W-WBC server of `demo.sh m3 --x280-sim` (`xpy $RT/x280/x280d.py serve --backend
+    sim`), on a given port; the sim hart's spin thread gets the last CPU of this process's mask."""
 
     def __init__(self, port: int, log_path: Path):
         self.port = port
         self.url = f"tcp://127.0.0.1:{port}"
-        env = {k: v for k, v in os.environ.items() if k not in SIM_ENV_KEYS}
-        env["PYTHONPATH"] = f"{RT}:{R}"
         self.log_path = Path(log_path)
         self.log = open(self.log_path, "a")
-        self.proc = subprocess.Popen([SRV_PYTHON, "-m", "rtserve.wbc_gpu_server", "--port", str(port)],
-                                     cwd=R, env=env, stdout=self.log, stderr=subprocess.STDOUT)
+        cmd = [str(XPY), str(RT / "x280" / "x280d.py"), "serve", "--backend", "sim", "--port", str(port),
+               "--sim-cpus", str(max(os.sched_getaffinity(0))), "--log-dir", str(self.log_path.with_suffix(""))]
+        self.proc = subprocess.Popen(cmd, cwd=RT, env={**os.environ, "PYTHONPATH": str(RT)}, stdout=self.log,
+                                     stderr=subprocess.STDOUT)
 
     def wait_ready(self, timeout_s: float = 120) -> float:
         import zmq
@@ -101,7 +101,7 @@ class WbcServer:
         ctx = zmq.Context.instance()
         while time.monotonic() - t0 < timeout_s:
             if self.proc.poll() is not None:
-                raise RuntimeError(f"wbc_gpu_server exited {self.proc.returncode}:\n{self.tail()}")
+                raise RuntimeError(f"x280d exited {self.proc.returncode}:\n{self.tail()}")
             s = ctx.socket(zmq.REQ)
             s.setsockopt(zmq.LINGER, 0)
             s.setsockopt(zmq.RCVTIMEO, 500)
@@ -114,7 +114,7 @@ class WbcServer:
                 pass
             finally:
                 s.close(linger=0)
-        raise TimeoutError(f"wbc_gpu_server not ready after {timeout_s} s:\n{self.tail()}")
+        raise TimeoutError(f"x280d not ready after {timeout_s} s:\n{self.tail()}")
 
     def tail(self, n: int = 30) -> str:
         self.log.flush()

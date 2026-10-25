@@ -18,19 +18,14 @@ export ONNX=$W/gr00t_wbc/sim2mujoco/resources/robots/g1/policy
 export SIM_PYTHON=$R/gr00t/eval/sim/GR00T-WholeBodyControl/GR00T-WholeBodyControl_uv/.venv/bin/python
 export SRV_PYTHON=$R/.venv/bin/python
 
-export VLA_GPU=tcp://127.0.0.1:5565
 export VLA_TT=tcp://127.0.0.1:5557
 export VLA_MOCK=tcp://127.0.0.1:5559
-export WBC_GPU=tcp://127.0.0.1:5556
 export WBC_X280=tcp://127.0.0.1:5558
 export TELEMETRY_PUB=tcp://127.0.0.1:5570
 export CONTROL_PULL=tcp://127.0.0.1:5571
 # Out-of-band device status PUBs read by the HUD chip panel (PLAN.md §4.3 item 7); both off unless --status-pub.
 export X280_STATUS=tcp://127.0.0.1:5573
 export TT_STATUS=tcp://127.0.0.1:5574
-
-# Default demo checkpoint (PLAN.md D11 / DP1).
-export VLA_CHECKPOINT=cloudwalk-research/GR00T-N1.6-G1-PnPAppleToPlate
 
 simpy() {
     (cd "$R" && env -u GR00T_WBC_SERVER MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 CUDA_VISIBLE_DEVICES= \
