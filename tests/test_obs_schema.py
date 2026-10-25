@@ -1,4 +1,4 @@
-"""PLAN.md §1.4.1: the W-VLA request the loop puts on the wire is the 9-key table, and the GPU server accepts it.
+"""PLAN.md §1.4.1: the W-VLA request the loop puts on the wire is the 9-key table, and the stock server accepts it.
 
 One RT run (2 episodes x 120 ticks, ORT WBC) talks to tests/stub_policy_server.py: gr00t's own
 PolicyServer + Gr00tSimPolicyWrapper(strict=True) with the checkpoint's UNITREE_G1 modality
@@ -63,7 +63,7 @@ def schema_run(tmp_path_factory):
 
 
 def _decode_gr00t(raw: bytes) -> dict:
-    """Decode with gr00t's own MsgSerializer (what the GPU server runs), not rtloop.wire."""
+    """Decode with gr00t's own MsgSerializer (what the stock server runs), not rtloop.wire."""
     from gr00t.policy.server_client import MsgSerializer
 
     return MsgSerializer.from_bytes(raw)

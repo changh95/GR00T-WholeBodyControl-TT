@@ -13,11 +13,11 @@ files named there stay authoritative.
 - Run everything through the wrappers in `env.sh` (`source ~/experiments/GR00T-WholeBodyControl-TT/env.sh`):
   `simpy` = sim/client venv (CUDA hidden, EGL on GPU 0; has torch CPU, onnxruntime 1.23, pyzmq,
   msgpack, numpy 1.26, pytest), `srvpy` = server venv (CUDA torch, onnx, pyzmq; **no
-  onnxruntime**). Both run with `cd $R` and `PYTHONPATH=$RT:$R`.
+  onnxruntime**; the PyTorch golden tooling of `rttt/GOLDEN.md`). Both run with `cd $R` and `PYTHONPATH=$RT:$R`.
 - Tests: `simpy -m pytest $RT/tests/<file> -q`. Unit tests bind servers to `127.0.0.1` on a
-  **random free port** (`socket.bind_to_random_port`), never to 5555–5572. Tests that need the
-  GPU or a sim env are marked `@pytest.mark.gpu` / `@pytest.mark.sim` (registered in
-  `tests/conftest.py`).
+  **random free port** (`socket.bind_to_random_port`), never to 5555–5572. Tests that build a
+  sim env are marked `@pytest.mark.sim`, tests that start a `--mode rt` loop `@pytest.mark.rt`
+  (registered in `tests/conftest.py`).
 - **Never** stop, restart or send `kill` to the server on 127.0.0.1:5555. Do not open the
   Tenstorrent device. Do not edit files outside `~/experiments/GR00T-WholeBodyControl-TT/`.
 - Times are `time.monotonic_ns()` (CLOCK_MONOTONIC) ints. Ticks are ints. Arrays crossing an
@@ -45,7 +45,7 @@ class SplicerConfig:
     late_reject_rows: int = 4  # reject a chunk if usable rows H - d <= this (d >= 26)
     starve_ramp: int = 5     # ticks to ramp nav to 0 when starved
     starve_fault: int = 50   # consecutive starved ticks -> STARVE_FAULT flag (episode continues)
-    d_init: int = 4          # d_hat before any measurement (4 on the 5090, 3 on TT)
+    d_init: int = 4          # d_hat before any measurement (3 on TT; VL: pass d_inj)
     sync_rows: int = 20      # rows a synchronous arm executes per chunk (C2/C2b/C6)
 
 @dataclass
@@ -134,7 +134,7 @@ A reply is `[action, info]` (a 2-list) or `{"error": ...}`.
 - `--latency-ms L --jitter-ms J` (uniform ±J, seeded), `--stall-after N --stall-s T` (the
   N-th request sleeps T s), `--seed`.
 
-## wbc_backends.py + rtserve/wbc_gpu_server.py + rtserve/gpu_vla_server.py (WP-1.4)
+## wbc_backends.py (WP-1.4)
 
 ```python
 class OrtCpu:                         # in-process onnxruntime, CPU provider
@@ -177,36 +177,10 @@ def install(runtime: WbcRuntime) -> None
 def uninstall() -> None
 ```
 
-`wbc_gpu_server.py` (srvpy): REP bound to `tcp://127.0.0.1:<--port 5556>` served from the
-**main thread**, wrapping `rtserve/vendor/gear_wbc_policy.py:GearWbcPolicies` (vendored copy,
-sha256 in `rtserve/vendor/SHA256SUMS`, checked at start). Endpoints: `ping`,
-`info` → `{"backend": "cuda-graph:rtx5090", "proto": 2, "policies": [...]}`,
-`gear_wbc_action(policy, obs, tick=None, seq=None)` → `{"action": (1,15) f32, "tick", "seq",
-"compute_us"}`. Boot self-check: max |err| < 1e-4 against a pure-numpy float64 forward pass of
-the ONNX initializers (the server venv has no onnxruntime) on 64 random inputs per policy.
-`--onnx-dir` default `$ONNX`. `--spin` (default off) busy-polls the REP socket instead of blocking in
-`recv`; only with a dedicated `--cpus` core whose SMT sibling is idle (T-1.4 measured it inconclusive
-with CPU 20, the sibling of 4, busy). `demo.sh --wbc-spin` passes it.
-
-`gpu_vla_server.py` (srvpy): builds `Gr00tPolicy(embodiment_tag=UNITREE_G1, model_path=--model,
-device="cuda")` → `Gr00tSimPolicyWrapper` exactly as `$R/gr00t/eval/run_gr00t_server.py` does
-(strict=True), serves the PolicyServer wire on `tcp://127.0.0.1:<--port 5565>` with endpoints
-`ping`, `info` (`{"backend": "cuda:rtx5090:<repo>@<sha8>", "proto": 2}`), `get_modality_config`,
-`reset`, `get_action(observation, options=None)`. If `options.rt.noise_seed` is present it calls
-`torch.manual_seed` + `torch.cuda.manual_seed(noise_seed)` before inference (PLAN.md D17).
-Returns `[action, info]` with info = `{"rt": <echo>, "t_recv_ns", "t_reply_ns", "infer_ms",
-"noise_seed", "backend"}`. No WBC endpoint. `--model` default
-`cloudwalk-research/GR00T-N1.6-G1-PnPAppleToPlate`. A request the client already abandoned
-(`schema.request_abandoned`) is answered `{"error": "stale ..."}` without inference. `--noise cpu`
-(opt-in; default `cuda` keeps the M1 noise stream): with a noise_seed, the action head's one
-`torch.randn` returns `randn(shape, generator=torch.Generator("cpu").manual_seed(seed), float32)`
-cast to the dtype/device it asked for, which is exactly server_g1's draw, so TT and GPU arms with the
-same seed are noise-paired (D17 across backends); info then adds `noise: "cpu"` and `randn_calls`. The `info`
-endpoint reports `model`, `revision` and `noise` ("cuda" | "cpu"). Who starts it how: `scripts/demo.sh` with
-`HF_HUB_OFFLINE=1` and `--model` = DP1's local snapshot dir (`rttt/convert_bf16.DEFAULT_SRC`, at SRC_SHA), plus
-`--noise cpu` for m2/m3 runs (m1 keeps `cuda`); `jobs/_common.sh start_gpu_servers` the same for the TT-vs-GPU arms.
-A server demo.sh finds already answering ping is reused as it is (with its own `noise`); the jobs' `pair` check
-(`need_gpu_servers pair`) refuses one whose `info.noise` is not `cpu`.
+`ZmqWbc.backend` comes from the server's `info.backend`: `x280-sim:*` → `X280_SIM`, `x280*` → `X280`, anything
+else (a stock PolicyServer has no `info`) → `OTHER`. `rtloop.loop.vla_backend_of` maps a VLA's `mock*` → `MOCK`,
+`tt:*` / Tensix → `TT`, anything else → `OTHER`. The values are the TickLog `wbc_be` / ChunkRecord `vla_be` codes;
+in runs of the M1/M2 baselines, 1 marks their GPU servers (code at the git tag `gpu-baselines`).
 
 ## telemetry.py + scripts/analyze_run.py + scripts/eval_paired.py (WP-1.6, WP-1.9)
 
@@ -240,7 +214,7 @@ writes `verdict.json` (`{"gates": name, "pass": bool, "checks": [{name, value, t
 plus plots (period/lateness/d/age/WBC-RTT histograms, Gantt of the first episode) and exits 1
 on FAIL. Gate sets in `gates.yaml`: `m1_rt`, `m1_negctl`, `m1_sim_smoke`, `m2_rt`, `m3_sim`, `m3_rt`,
 `m3_rt_slow` (PLAN.md §4.2; the comments in the file say where a set departs from the proposals in
-`configs/gates_m{2,3}.proposed.yaml` and why). Keys added for M2/M3: `starved_frac_max`,
+`configs/gates_m3.proposed.yaml` and the M2 one, which is in the git history, and why). Keys added for M2/M3: `starved_frac_max`,
 `starved_run_max`, `vla_errors_max` (outcome ERROR), `shadow_da_p999_max`, `wbc_x280_frac_min` (ticks
 with wbc_be X280 or X280_SIM), `wbc_visible_wait_p99_ms` (wbc_rtt_us of ticks with wbc_early = 1; no
 data until the WP-3.8b client exists) and `x280_heartbeat_continuity_min` (x280d's ring, status 3 =
@@ -338,7 +312,7 @@ to a later run. The HUD's PUSH uses ZMQ_IMMEDIATE: with no loop listening the se
 
 Loop flags: `--control [URL]` (bare = `$CONTROL_PULL`), `--vla-alt NAME=URL,...` (pinged, info'd and
 modality-checked at startup), `--wbc-alt NAME=URL,...` (ZmqWbc with the parity check; `ort` is always a target and
-the primary is named by its backend: gpu, x280, x280_sim), `--swap-wbc-every S` (T-3.9: a synthetic `swap_wbc next`
+the primary is named by its backend: x280, x280_sim, other), `--swap-wbc-every S` (T-3.9: a synthetic `swap_wbc next`
 every S seconds of ticks). The control PULL is polled once per tick after the TickLog commit and the PUB (about 2 µs
 idle). The `meta` topic adds `seed`, `endpoints {vla, wbc}`, `current {vla, wbc}`, `targets {vla, wbc}`,
 `pending_vla`, `paused`, `control`; the episode record adds `vla_target`, `wbc_target`, `n_wbc_swaps`, `paused_ms`
@@ -408,12 +382,8 @@ state when it is not released), heartbeat (Δ`heartbeat`/s, "+50.0 M/s"; critica
 advanced for 1 s (2.5 snapshot periods at a slower `--status-hz`), "stream stale" when the stream is; "age N µs" from a publisher without `heartbeat`), x280d
 last/p99 (µs), compute last (µs, two decimals), calls served (`calls_ok` and calls/s), runs / overrun, reentry / BEU,
 ECC fix / fail, variant, fw / build; the floorplan labels x280d's tile "serving N/s" the same way. The processor map
-has no RTX 5090 box when nothing in the run is on the GPU: neither meta `processor` stamp classifies as GPU and no
-meta `targets` name (the loop's swap targets, `--vla-alt` / `--wbc-alt`) matches gpu / cuda / 5090, and before any
-meta (e.g. `demo.sh m3 --no-alt`, `jobs/m3_soak.sh`). It is decided from the run's configuration, never from a tick,
-so the layout holds through fallbacks and swaps; the Blackhole box then takes the freed row and gives each engine a
-line with its live state (server_g1's device p50 and calls/s; the X280 tile and "serving N/s"; without a live
-stream the loop's round-trip p50).
+has a Host CPU box and a Blackhole box, which gives each engine a line with its live state (server_g1's device p50
+and calls/s; the X280 tile and "serving N/s"; without a live stream the loop's round-trip p50).
 
 ## rttt (M2): `rttt/server_g1.py` on `:5557`
 
@@ -423,9 +393,8 @@ decode), `t_reply_ns`, `infer_ms`, `noise_seed`, `backend`, `encode_ms`, `device
 forwards encode/device/decode on the `req` topic's `srv`, and the HUD shows the split). Backend stamps:
 `tt:p150a:<repo>@<sha8>` (rtloop `vla_backend_of` → TT) and `mock:server_g1-fake` for `--fake-model` (→ MOCK).
 `noise_seed` reseeds a CPU `torch.Generator` (fp32 (1, 50, 128), the same tensor as `rttt/g1_n16.make_noise(seed)`),
-reported as `info.noise = "cpu"`; the GPU server draws the same noise only with `--noise cpu`
-(`tests/tt/test_noise_cross_venv.py` compares the two draws across srvpy and ttpy, fp32 and after the bf16 cast).
-torch's CPU generator keeps only a seed's low 32 bits (0 and 2**63 draw the same noise), on both sides alike. An
+reported as `info.noise = "cpu"`.
+torch's CPU generator keeps only a seed's low 32 bits (0 and 2**63 draw the same noise). An
 abandoned request gets `{"error": "stale ..."}` without inference. Test-only, behind
 `--debug-endpoints`: `predict_debug(observation, noise)`, `x280_peek(x, y, addr, n)`, `x280_lim_write(x, y, addr,
 data)` (LIM init method B, LIM only). The observation is cut to the 9 modality keys before `split_batch` (the stock
@@ -474,21 +443,13 @@ Placement (`scripts/chip_lib.sh`, shared by the session, `start_vla.sh` and the 
 - `CHIP_SAFE_CPUS` (a taskset list; unset = no pin): the session and every job pin themselves to it
   (`chip_pin_safe`), and everything that would take a real-time core refuses before it starts (exit 2; vla_start
   returns 5): a server_g1 `--cpus` outside it (vla_start and server_g1 itself), an x280d `--cpus` / `--sim-cpus` outside it (every
-  x280d subcommand), the GPU servers a job would start (`start_gpu_servers`), the closed-loop jobs (`need_rt_cores`:
-  t2_sync, t2_soak, t2_soak_2h, t2_primary, m3_eval, m3_faults, m3_soak, m3_shadow in rt mode; `rtloop.loop --mode rt` pins
-  itself onto CPUs 2/3 whatever the job's mask) and `jobs/demo_m2.sh` / `demo_m3.sh`.
+  x280d subcommand), the closed-loop jobs (`need_rt_cores`: m3_eval, m3_faults, m3_soak, m3_shadow in rt mode;
+  `rtloop.loop --mode rt` pins itself onto CPUs 2/3 whatever the job's mask) and `jobs/demo_m3.sh`.
 
 Job helpers and environment:
-- `jobs/_common.sh` (every session job): `need_vla`, `need_debug_endpoints`, `need_rt_cores [WHAT]`,
-  `need_gpu_servers wbc|vla|pair` (vla: the GPU VLA serves DP1@SRC_SHA; pair: also `info.noise` "cpu" and one seeded
-  call replying `{noise: cpu, randn_calls: 1}`, saved as `gpu_vla_info.json`), `start_gpu_servers` (`T2_START_GPU=1`:
-  wbc_gpu_server on CPU 4, gpu_vla_server on CPUs 12-15 from the local DP1 snapshot with `HF_HUB_OFFLINE=1` and
-  `--noise cpu`), `session_matrix` (a matrix rewritten to this session's endpoints), `save_server_info`, and
-  `job_exit` (a tool's exit 3 becomes 4). Env: `T2_DRY_RUN=1` (print the sim commands, run none), `T2_GPU_VLA`
-  (default `$VLA_GPU`), `T2_WBC` (default `$WBC_GPU`; `ort` = the loop's in-process WBC), `T2_START_GPU`; T-2.6/T-2.8
-  `T26_BENCH` (a `t23_bench.json`, or `projected`; unset = `rttt/m2_checks.py bench`'s pick, printed),
-  `T2_SOAK_DURATION`, `T2_SOAK_TAG`, `T2_SOAK_DEMO_ARGS`, `T2_SOAK_LOOP_ARGS`, `T2_SOAK_GATE_DRIFT`; T-2.5
-  `T2_ANCHOR_EPISODES`, `T2_SKIP_ANCHOR`; T-2.7 `T2_GPU_ARM_DIRS`, `T2_FORCE_REUSE`.
+- `jobs/_common.sh` (every session job): `need_vla`, `need_debug_endpoints`, `need_rt_cores [WHAT]`, `ping_url`,
+  `save_server_info`, and `job_exit` (a tool's exit 3 becomes 4). Env: `T2_DRY_RUN=1` (print the sim commands, run
+  none; jobs/m3_soak.sh), `T2_GOLDEN` (the S1 jobs' golden dir).
 - `jobs/_x280.sh` (the M3 jobs): `need_x280 MODE...`, `x280 SUB ARGS` (= `x280d.py SUB --via $CHIP_X280_URL`),
   `x280_step NAME SUB ARGS` (JSON in `NAME.json`), `x280_reattach` (its `serve` arguments are the session's
   `CHIP_X280D_SERVE_ARGS`, unset = chip_session's default, with --stage0 / --boot / --no-release swapped for --attach
@@ -499,7 +460,7 @@ Job helpers and environment:
   when outside CHIP_SAFE_CPUS; `--spin` with `X280_RTT_SPIN=1`), `x280_dirty WHY` (exit 3).
   Env: `X280_SLOW=1` (DP11), `X280_TIMEOUT_S`; S1c `S1C_E1A_STORE` (method A's store, default a64); S1d
   (`jobs/s1d.sh`) `S1D_PLAN`, `S1D_LINES`, `S1D_PROBE_LINES`, `S1D_PARTIAL`, `S1D_SEED`, `S1D_BASE`; T-3.7 `M3_T23_BENCH` (required: a `t23_bench.json` or `none`), `M3_EVAL_EPISODES`,
-  `M3_EVAL_MAX_TICKS`, `M3_EVAL_SEEDS`, `M3_EVAL_LOOP_ARGS`, `M3_SKIP_SCREEN`; T-3.6 `M3_SHADOW_*`; T-3.8
+  `M3_EVAL_MAX_TICKS`, `M3_EVAL_SEEDS`, `M3_EVAL_LOOP_ARGS`; T-3.6 `M3_SHADOW_*`; T-3.8
   `M3_FAULT_DURATION`, `M3_FAULT_GAP_S` (30 s between the cases), `M3_FAULT_SEEDS`; T-3.5 `M3_RTT_N`; T-3.E4
   `E4_ITERS`, `E4_RTT_N`, `E4_TT_N`; T-3.E5a `X280_PARITY_OBS`, `X280_PARITY_N`, `X280_PARITY_N_V0`; T-3.9
   (`jobs/m3_soak.sh`) `M3_SOAK_DURATION` (7200), `M3_SOAK_SWAP_S` (10), `M3_SOAK_TAG` (t39), `M3_SOAK_SEEDS`,
@@ -511,11 +472,6 @@ Job helpers and environment:
   `e5_summary.json` (`obs`, `boot`, per run `rows` / `rows_served`); T-3.5 `t35_summary.json` (`checks` = PLAN T-3.5's
   x280d-side gates, `pass` from them alone, `reported` = client RTT and placement, TT latency); T-3.9
   `t39_summary.json`.
-- `rttt/m2_checks.py` (simpy): `gates SRC DST [BENCH]` (m2_rt with vla_p50 = 1.1 x the bench's server p50), `bench
-  ROOT [ARENA]` (the newest passing `t23_bench.json` of the bfp8_b arena), `soak RUN DUR OUT [--gate-drift]` (the
-  HUD's `vla=tensix` placement and the VLA p50 drift), `errors RUNS OUT` (0 server errors or hangs per arm), `matrix
-  SRC DST TT GPU WBC`, `tt-only MATRIX DST`, `reuse TT_RUNS|- GPU_DIRS OUT [--force]` (`--force` never overrides
-  unpaired noise).
 - `x280/tools/m3_jobs.py` (the M3 jobs' verdicts, stdlib only except m3-gates): `s1c-summary DIR E1A_OK METHOD
   [k=rc ...]` (S1c and the S2 GO/NO-GO, plus `ecc`: each LIM init's and check's CCACHE ECC deltas, events per line /
   per word read, last event address and the failed parts of each gate; reporting only), `s1d-summary DIR [k=rc ...]`

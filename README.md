@@ -24,13 +24,15 @@ The checkpoint succeeds in about 20-30% of episodes in this env on any backend (
 | next: the WBC on 4 X280 tiles x up to 4 harts | single-hart kernel done (v3, 0.278 ms); S5a: all four L2CPU tiles probe clean; tensor-parallel firmware not yet written |
 
 The simulator (MuJoCo physics and its camera renders) runs on the host; no policy runs there. The baselines the
-M3 numbers are compared against ran the VLA and the WBC on a GPU (M1.md, M2.md). Results:
+M3 numbers are compared against ran the VLA and the WBC on a GPU (M1.md, M2.md); their code is at the git tag
+`gpu-baselines`. Results:
 `docs/plan/vla-wbc-x280/results/`. Design and test plan: `docs/plan/vla-wbc-x280/PLAN.md`.
 Module contracts: `INTERFACES.md`. Test suites and how to run them: `TESTING.md`.
 
 ## Layout
 
-- `rtloop/` the 50 Hz loop (splicer, VLA/WBC clients, telemetry, viewer process); `rtserve/` the baseline servers and the mock VLA used by the tests
+- `rtloop/` the 50 Hz loop (splicer, VLA/WBC clients, telemetry, viewer process); `rtserve/` the mock VLA used by the
+  tests and the numpy gear_wbc reference
 - `rttt/` the TT VLA server (`server_g1.py`) on the tt-metal megakernel GR00T port
 - `x280/` the X280 side: firmware (`fw/`: crt0, monitor, kernels, stage-0 LIM initialiser, multi-hart runtime),
   host layer (`host/kmd.py`, `host/wcio.c`), register map and write allowlist (`regs.py`), daemon (`x280d.py`), simulators

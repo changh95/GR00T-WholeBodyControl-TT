@@ -4,8 +4,9 @@ Why: ``cloudwalk-research/GR00T-N1.6-G1-PnPAppleToPlate@2a5b61cc`` stores 517 of
 LLM layers 12-15, encoders, decoder, vlln; index total_size 9,813,153,664 B). The port reads tensors as stored
 (``MK/models/experimental/gr00t/common/weights.py:1076-1078``, no cast), so its host plan would carry fp32 where it
 assumes bf16 (``weights.py:1765-1768``) and double its cache bytes (U:tt "Cloudwalk checkpoint dtype mismatch").
-The GPU reference casts the whole model to bf16 at load (``R/gr00t/policy/gr00t_policy.py:82-84``), so a copy
-rounded once with torch's round-to-nearest-even ``.to(torch.bfloat16)`` is faithful to what the 5090 serves.
+The PyTorch reference (Gr00tPolicy, the goldens' bf16 run) casts the whole model to bf16 at load
+(``R/gr00t/policy/gr00t_policy.py:82-84``), so a copy rounded once with torch's round-to-nearest-even
+``.to(torch.bfloat16)`` is faithful to what it computes.
 
 What is written (never into ``~/.cache/huggingface``)::
 

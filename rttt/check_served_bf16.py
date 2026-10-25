@@ -1,7 +1,7 @@
-"""Is the bf16 golden what gpu_vla_server serves? (WP-2.2, optional GPU check, srvpy.)
+"""Is the bf16 golden what Gr00tPolicy serves without the determinism flags? (WP-2.2, optional GPU check, srvpy.)
 
 make_g1_golden.py runs with torch's deterministic-algorithm flags and a fixed cuBLAS workspace;
-gpu_vla_server runs without them. This loads Gr00tPolicy exactly as the server does, in a fresh
+a policy server runs without them. This loads Gr00tPolicy exactly as a server does, in a fresh
 process with no flags, feeds each golden observation with its saved noise through
 ``Gr00tSimPolicyWrapper.get_action`` and compares the normalised prediction and the decoded actions
 with ``samples/<sid>.npz`` bit for bit. Exit 0 when all 20 are identical.

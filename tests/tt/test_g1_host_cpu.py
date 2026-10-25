@@ -378,7 +378,7 @@ def test_host_decode_equals_isaac(g1, golden_dir):
                     reason="opt-in (RTTT_CPU_REF=1): the fp32 CPU reference needs ~13 GB RAM and 12 threads for ~20 s")
 def test_cpu_reference_matches_g1_goldens(g1, golden_dir):
     """The port's fp32 CPU reference (MK reference/model.py) on the BF16 copy, layout g1, slot 8, the golden noise:
-    the boot samples' action_pred_norm[0, :30, :35] vs the 5090 goldens. Measured 2026-10-24: PCC 0.99998 vs bf16,
+    the boot samples' action_pred_norm[0, :30, :35] vs the PyTorch goldens. Measured 2026-10-24: PCC 0.99998 vs bf16,
     0.999999 vs fp32, decoded max|d| <= 0.0069 vs bf16. Checks weights + layout + host pipeline before the device."""
     if not (golden_dir / "samples").is_dir():
         pytest.skip(f"G1 goldens not written yet under {golden_dir}")

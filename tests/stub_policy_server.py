@@ -1,6 +1,6 @@
 """The stock gr00t PolicyServer around a real Gr00tSimPolicyWrapper(strict=True) with no model (§1.4.1).
 
-The request test needs the *real* acceptance rules of the GPU server (``run_gr00t_server.py
+The request test needs the *real* acceptance rules of the stock server (``run_gr00t_server.py
 --use-sim-policy-wrapper``) without a GPU: the wrapper's flat ``check_observation`` and, behind it,
 ``Gr00tPolicy.check_observation`` on the nested observation and ``check_action`` on the reply. Only
 the model is missing: ``Gr00tPolicy`` is created without ``__init__`` (which would load the

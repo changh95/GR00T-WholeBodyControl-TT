@@ -1391,7 +1391,7 @@ class Session:
         return [p for p, tt in self.policy_tile.items() if tt == t and (mask >> p) & 1]
 
     def check_parity(self, n: int = 4, seed: int = 0) -> dict:
-        """Boot self-check: INFER on seeded N(0,1) obs vs the x86 build of the same blob (cf. wbc_gpu_server)."""
+        """Boot self-check: INFER on seeded N(0,1) obs vs the x86 build of the same blob."""
         rng = np.random.default_rng(seed)
         out = {}
         for t in self.tiles:
@@ -2737,7 +2737,7 @@ class Server:
 
     def _recv_spin(self, budget_s: float) -> Optional[bytes]:
         """Busy-poll for a request for up to budget_s, yielding the CPU on every miss: --cpus pins zmq's I/O thread
-        to the same core, and a poll that never yields holds it off for a scheduler slice (as wbc_gpu_server --spin
+        to the same core, and a poll that never yields holds it off for a scheduler slice (as the M1 WBC server's --spin
         found in T-1.4: overhead p99 0.92 ms without the yield, 0.37 ms with it). None when the budget ran out."""
         t_end = time.perf_counter() + budget_s
         while not self.stop:

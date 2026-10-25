@@ -4,7 +4,7 @@ A variant of ``R/tt_golden/dump_golden_n16.py`` for the DP1 checkpoint and the 2
 observations of ``select_g1_obs.py``. Per sample it saves the initial flow-matching noise, the
 normalised prediction ``action_pred_norm`` (1, 50, 128) and the decoded W-VLA actions of two runs:
 
-- ``bf16``, the deployed numerics: Gr00tPolicy exactly as gpu_vla_server builds it (weights cast to
+- ``bf16``, the deployed numerics: Gr00tPolicy exactly as a policy server builds it (weights cast to
   bf16 at load, bf16 inputs, flash_attention_2, default SDPA backend). Each sample is checked
   bit-identical against ``Gr00tSimPolicyWrapper.get_action`` with the same noise.
 - ``fp32``, the cleaner reference: the checkpoint at its stored precision (the 517 F32 tensors kept,

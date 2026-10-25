@@ -1,6 +1,6 @@
 """Mock W-VLA server speaking the stock PolicyServer wire (INTERFACES.md WP-1.3, PLAN.md §1.4.1).
 
-It stands in for the GPU/TT VLA in unit, equivalence, alignment and fault tests. Only numpy, zmq,
+It stands in for the TT VLA in unit, equivalence, alignment and fault tests. Only numpy, zmq,
 msgpack and rtloop.schema/wire are imported (no gr00t, no torch), so it starts in well under 1 s
 and runs under either venv.
 
@@ -274,7 +274,7 @@ class MockVlaServer:
         obs = data.get("observation")
         options = data.get("options") or {}
         rt = options.get("rt") if isinstance(options, dict) else None
-        if self.mode in SYNTH and request_abandoned(rt, t_recv):  # as gpu_vla_server: no service time
+        if self.mode in SYNTH and request_abandoned(rt, t_recv):  # as server_g1: no service time
             self.n_stale += 1
             return wire.dumps({"error": f"stale request seq {rt.get('seq')} (abandoned by the client)"})
         idx = self.n_get
@@ -480,7 +480,7 @@ def main(argv=None) -> None:
                     help="get_action requests 0..N-1 are normal; request N (0-based) stalls")
     ap.add_argument("--stall-s", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=0, help="jitter RNG seed")
-    ap.add_argument("--upstream", help="record-proxy: upstream URL, e.g. tcp://127.0.0.1:5565")
+    ap.add_argument("--upstream", help="record-proxy: upstream URL, e.g. tcp://127.0.0.1:5557")
     ap.add_argument("--upstream-timeout-ms", type=int, default=30000)
     ap.add_argument("--record-dir")
     ap.add_argument("--replay-dir")

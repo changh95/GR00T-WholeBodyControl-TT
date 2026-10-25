@@ -10,16 +10,17 @@ and the server_g1 boot check compare against them, and T-2.1 (host encode/decode
 
 ## Regenerate
 
-Run the steps in this order (`source $RT/env.sh` in every shell). Steps 1 and 3 use the GPU and need ≥ 20 GB free
-VRAM; the untouchable `:5555` server alone takes about 7.3 GB. `check_served_bf16` also uses the GPU (≥ 10 GB).
+Run the steps in this order (`source $RT/env.sh` in every shell). Step 3 uses the GPU and needs ≥ 20 GB free VRAM
+(as step 1 did, through the GPU VLA server); the untouchable `:5555` server alone takes about 7.3 GB.
+`check_served_bf16` also uses the GPU (≥ 10 GB).
 
 ```bash
-# 1. Raw observations: a private GPU server on a free port, then a sync-mode loop that dumps every request.
-P=40484   # any free port outside 5555-5572
-nice -n 19 taskset -c 16,17,20-31 srvpy -m rtserve.gpu_vla_server --port $P &      # wait for "ready"
+# 1. Raw observations: a sync-mode loop against a W-VLA server that dumps every request it sends. The recorded set
+#    was served by the M1 GPU VLA server (rtserve/gpu_vla_server.py, now only at the git tag gpu-baselines) on a free
+#    port; another server (e.g. server_g1 in a device session) gives a new golden set.
+P=40484   # that server's port (a free port outside 5555-5572)
 nice -n 19 taskset -c 16,17,20-31 simpy -m rtloop.loop --mode sync --vla tcp://127.0.0.1:$P --wbc ort \
     --seeds 0-9 --crn --dump-vla-obs 1000 --tag wp22_golden_obs --runs-root $RT/runs/wp22
-kill <server pid>                                                                  # never pkill -f
 # 2. Pick the 20 observations -> obs/ + obs_index.json
 simpy -m rttt.select_g1_obs --run $RT/runs/wp22/<stamp>_wp22_golden_obs
 # 3. bf16 + fp32 goldens -> samples/ + manifest.json (about 1 min, peak 12.5 GB allocated)
@@ -76,7 +77,7 @@ Encode values are those from before Gr00tPolicy's bf16 cast (`gr00t_policy.py:32
 
 ## The two runs
 
-- **bf16 (primary T-2.2 reference, = deployed):** Gr00tPolicy as gpu_vla_server builds it: `model.to(bfloat16)`,
+- **bf16 (primary T-2.2 reference, = deployed):** Gr00tPolicy as a policy server builds it: `model.to(bfloat16)`,
   bf16 inputs, flash_attention_2 for the LLM and Siglip2, and the default diffusers SDPA for the DiT. Every sample
   equals `Gr00tSimPolicyWrapper.get_action` with the same noise bit for bit (pred and actions max|d| = 0). In a
   fresh process without torch's deterministic flags or the cuBLAS workspace setting (`check_served_bf16.py`), all

@@ -56,7 +56,7 @@ from rtloop import schema
 from rttt import convert_bf16 as CB
 
 VERSION = "n16"
-SRC_REPO, SRC_SHA = CB.SRC_REPO, CB.SRC_SHA  # DP1: the F32 checkpoint the 5090 serves
+SRC_REPO, SRC_SHA = CB.SRC_REPO, CB.SRC_SHA  # DP1: the F32 checkpoint (the PyTorch reference loads it)
 REPO, SHA = CB.BF16_REPO, CB.BF16_SHA  # what the port reads (WP-2.1b copy)
 LAYOUT_NAME = "g1"
 BASE_LAYOUT = "gr1"

@@ -9,11 +9,11 @@ Endpoints (frozen W-VLA contract, D1): ``ping``, ``info``, ``get_modality_config
 objects built from the checkpoint's processor_config.json), ``reset`` (-> ``{}``), ``get_action(observation,
 options=None)`` -> ``[action, info]`` with ``action.<group>`` f32 (B, 30, D) and info = the ``options.rt`` echo,
 ``t_recv_ns`` (stamped before the request is decoded), ``t_reply_ns``, ``infer_ms``, ``noise_seed``, ``backend``,
-``encode_ms`` / ``device_ms`` / ``decode_ms`` and ``tree`` (same keys as ``rtserve/gpu_vla_server.py`` plus the TT
-split, PLAN.md §1.4.1). There is no ``kill`` endpoint. Every failure is replied as ``{"error": str}`` and serving
+``encode_ms`` / ``device_ms`` / ``decode_ms`` (the TT split) and ``tree`` (PLAN.md §1.4.1). There is no ``kill``
+endpoint. Every failure is replied as ``{"error": str}`` and serving
 continues; a request the client has already abandoned (``options.rt`` ``t_send_ns`` + ``give_up_ms`` before the
 receive stamp, :func:`rtloop.schema.request_abandoned`) is answered ``{"error": "stale ..."}`` without inference, as
-``rtserve/gpu_vla_server.py`` does, so requests queued during a stall do not each cost an inference ahead of the live
+``rtserve/mock_vla_server.py`` does, so requests queued during a stall do not each cost an inference ahead of the live
 one. Test-only, behind ``--debug-endpoints`` (outside D1): ``predict_debug(observation, noise)`` (fixed noise in,
 ``action_pred_norm`` + decoded actions out, the same ``predict_normalized`` call as the per-call path),
 ``x280_peek(x, y, addr, n)`` (``ttnn.cluster.read_reg``, ``tt-metal/ttnn/cpp/ttnn-nanobind/cluster.cpp:172-186``;
@@ -26,9 +26,7 @@ more, two of them f32 480x640 camera copies), checked like ``Gr00tSimPolicyWrapp
 by element at batch 1: host encode -> ``predict_normalized`` (4 traces, megakernel DiT) -> host decode. Noise is
 fresh per element from one CPU ``torch.Generator(--seed)``; ``options.rt.noise_seed`` (D17) reseeds it first, so
 paired arms on this backend draw the same noise for the same request. For B = 1 that noise is exactly
-``g1_n16.make_noise(noise_seed)`` (CPU generator, fp32 (1, 50, 128)), reported as ``info.noise = "cpu"``; the GPU
-server draws the same tensor only with ``rtserve/gpu_vla_server.py --noise cpu`` (cast to the bf16 the action head
-asks for), which is what pairs a TT arm with a GPU arm (D17; jobs/_common.sh checks the GPU server's info.noise). One
+``g1_n16.make_noise(noise_seed)`` (CPU generator, fp32 (1, 50, 128)), reported as ``info.noise = "cpu"``. One
 JSONL line per get_action / predict_debug call (``--log``); a line that cannot be written is counted, never fatal.
 
 Status stream (``--status-pub [URL]``, PLAN.md §4.3 item 7, default off; bare flag = ``tcp://127.0.0.1:5574``):
@@ -95,7 +93,7 @@ STATUS_HZ_RANGE = (2.0, 10.0)
 STATUS_HWM = 10
 STATUS_WINDOW = 50  # p50 over the last 50 calls
 DUTY_WINDOW_S = 5.0
-NOISE = "cpu"  # per-call noise: torch.Generator("cpu"), fp32; the mode name gpu_vla_server --noise uses for this draw
+NOISE = "cpu"  # per-call noise: torch.Generator("cpu"), fp32 (info.noise)
 
 
 class DebugDisabled(Exception):
@@ -537,7 +535,7 @@ class G1Server:
     def get_action(self, observation: Any, options: Any = None) -> Any:
         t_recv = self.t_recv_ns
         rt = options.get("rt") if isinstance(options, dict) else None
-        if schema.request_abandoned(rt, t_recv):  # as rtserve/gpu_vla_server.py:120-128: no inference
+        if schema.request_abandoned(rt, t_recv):  # as rtserve/mock_vla_server.py: no inference
             self.n_stale += 1
             self._rec = {"endpoint": "get_action", "stale": True, "t_recv_ns": t_recv,
                          **{k: rt.get(k) for k in ("seq", "gen", "ep", "k_obs")}}
@@ -690,7 +688,7 @@ class G1Server:
                 continue
             last = time.monotonic()
             frame = self.sock.recv()
-            self.t_recv_ns = time.monotonic_ns()  # before decode, like gpu_vla_server (and the stale check)
+            self.t_recv_ns = time.monotonic_ns()  # before decode (the stale check uses it)
             reply = self.handle(frame)
             self.sock.send(reply)
             self._write_log()  # after the reply: logging never adds to the client's latency
