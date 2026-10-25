@@ -218,7 +218,7 @@ X280_SRV=(xpy "$RT/x280/x280d.py" serve --backend sim --port "$(port_of "$WBC_X2
 HUD_CMD=(simpy "$RT/scripts/hud.py" --sub "$PUB_URL" --control "$CTL_URL" --cpus "$AUX"
          --summary "$LOGDIR/hud_summary.json")
 [ "$CONTROL_OK" = 1 ] || HUD_CMD+=(--no-control)
-ONTOP_CMD=(simpy "$RT/prototypes/keep_viewer_on_top.py")
+ONTOP_CMD=(simpy "$RT/scripts/keep_viewer_on_top.py")
 REC_CMD=("$RT/scripts/record_demo.sh" --out "$LOGDIR/demo.mp4" --display "$DISPLAY")
 
 # --- dry run: print the plan, touch nothing --------------------------------------------------------

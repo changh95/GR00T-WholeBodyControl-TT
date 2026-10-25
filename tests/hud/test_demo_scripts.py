@@ -68,7 +68,7 @@ def test_m1_dry_run_plan():
         assert part in loop, part
     assert re.search(r"^taskset -c 6,7 simpy \S+/scripts/hud\.py --sub tcp://127\.0\.0\.1:5570 "
                      r"--control tcp://127\.0\.0\.1:5571", out, re.M)
-    assert re.search(r"^taskset -c 6,7 simpy \S+/prototypes/keep_viewer_on_top\.py", out, re.M)
+    assert re.search(r"^taskset -c 6,7 simpy \S+/scripts/keep_viewer_on_top\.py", out, re.M)
     assert re.search(r"^\S+/scripts/record_demo\.sh --out \S+/demo\.mp4 --display :1", out, re.M)
     assert "analyze_run.py <run dir> --gates m1_rt" in out
     assert "XAUTHORITY=/run/user/1000/gdm/Xauthority" in out

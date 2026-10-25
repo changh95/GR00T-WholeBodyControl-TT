@@ -4,11 +4,12 @@
 
 Spawned by rtloop.loop under --viewer (rtloop.viewer.ViewerLink), with CUDA hidden and MUJOCO_GL=glfw for a
 window on $DISPLAY. It owns its own MjModel + MjData, loaded from the MJB the loop saves at every reset, and a
-mujoco passive viewer with the free tracking camera of prototypes/live_viewer.py (the camera follows the pelvis
-and the mouse orbits and zooms; collision geoms hidden as in robosuite's mjviewer). About 60 times a second it
-takes the latest consistent state snapshot (seqlock reader: it retries a torn copy), runs mj_forward and syncs
-the window. A new model generation is loaded into the same window. Nothing it does is ever waited for by the
-loop; it writes only its own counters (pid, frames, last seq, generation, loads) into the header.
+mujoco passive viewer with the free tracking camera of the day-1 prototype live_viewer.py (git history at
+c1d5b90; the camera follows the pelvis and the mouse orbits and zooms; collision geoms hidden as in robosuite's
+mjviewer). About 60 times a second it takes the latest consistent state snapshot (seqlock reader: it retries a
+torn copy), runs mj_forward and syncs the window. A new model generation is loaded into the same window. Nothing
+it does is ever waited for by the loop; it writes only its own counters (pid, frames, last seq, generation, loads)
+into the header.
 
 It exits when the window is closed, on SIGINT/SIGTERM, or when the loop dies (PR_SET_PDEATHSIG kills it with
 SIGKILL, and every frame checks the parent pid). numpy and mujoco are imported after --cpus is applied, so all
@@ -120,7 +121,7 @@ class StateReader:
 
 
 def camera_angles(model, data, camera, body) -> dict:
-    """The free-camera angles that look along `camera` at `body` (prototypes/live_viewer.py)."""
+    """The free-camera angles that look along `camera` at `body` (the day-1 prototype live_viewer.py, c1d5b90)."""
     import numpy as np
 
     cam = model.camera(camera).id

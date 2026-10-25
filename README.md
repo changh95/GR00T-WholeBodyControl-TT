@@ -38,6 +38,7 @@ Module contracts: `INTERFACES.md`. Test suites and how to run them: `TESTING.md`
 - `third_party_refs/SHAS.txt`, `x280/refs/SOURCES.txt`: the upstream sources the code cites (fetch them; not vendored)
 - `docs/plan/vla-wbc-x280/`: plan, results (M1-M3), research; `docs/media/`: the README GIF (the MP4s are on the release)
 - not tracked: `runs/` (every session's logs, ticks and recordings), `snapshots/` (frozen worktrees for device sessions)
+- the day-1 prototypes (`prototypes/`: first experiments and their captured outputs) are in git history at `c1d5b90`
 
 ## Setup
 

@@ -11,7 +11,7 @@ third_party_refs/*/
 # and x280/sim/.gitignore; x280/host/libwcio.so by x280/host/.gitignore.
 # tt-metal runtime artefacts written into the working directory by device sessions
 generated/
-# large captured observations (prototype data; regenerate with prototypes/serving/capture_obs.py)
+# a large captured observation left by the day-1 prototypes (their scripts are in git history at c1d5b90)
 prototypes/serving/obs_reset.pkl
 # GPL-2.0 reference copy: fetch it from the URL in x280/refs/SOURCES.txt (sha256 listed there)
 x280/refs/linux-*.c

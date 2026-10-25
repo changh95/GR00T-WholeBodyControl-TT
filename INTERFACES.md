@@ -310,11 +310,11 @@ if the loop dies without `close()`), named `rtv<loop pid>_<6 hex>`:
   bit, at resets and mid-episode (`tests/test_viewer.py`). Nothing else in this env's model changes during an
   episode (all MjModel arrays compared over 300 ticks); `geom_rgba`/`site_rgba` are copied anyway.
 
-The viewer renders at about 60 Hz with the free tracking camera of `prototypes/live_viewer.py` (follows the
-pelvis, mouse orbits and zooms, collision geoms hidden as in robosuite's mjviewer). It exits when its window
-is closed, on SIGINT/SIGTERM (the loop's `close()` sends SIGTERM on every exit path: normal, SIGINT, SIGTERM),
-or when the loop dies (`PR_SET_PDEATHSIG` = SIGKILL, plus a parent-pid check per frame). With no usable
-display it exits at once (rc 2, "GLFW cannot open a window" in `viewer.log`).
+The viewer renders at about 60 Hz with the free tracking camera of the day-1 prototype `live_viewer.py` (git
+history at c1d5b90: follows the pelvis, mouse orbits and zooms, collision geoms hidden as in robosuite's
+mjviewer). It exits when its window is closed, on SIGINT/SIGTERM (the loop's `close()` sends SIGTERM on every
+exit path: normal, SIGINT, SIGTERM), or when the loop dies (`PR_SET_PDEATHSIG` = SIGKILL, plus a parent-pid
+check per frame). With no usable display it exits at once (rc 2, "GLFW cannot open a window" in `viewer.log`).
 
 Recorded: config.json `viewer` (plan, pid, CPUs, shm prefix, log, DISPLAY; at close `end` = published,
 generations, frames, models loaded, `exited` {rc, k} if it died early, the viewer's threads and CPUs, rc),
