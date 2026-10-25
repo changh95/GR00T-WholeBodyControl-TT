@@ -1,4 +1,4 @@
-# Written by build_spike.sh; what /home/deepgadget/experiments/gr00t/rtloop/x280/sim/spike-install was built from.
+# Written by build_spike.sh; what /home/deepgadget/experiments/GR00T-WholeBodyControl-TT/x280/sim/spike-install was built from.
 riscv-isa-sim 2c300cd90eb74bb79f3fcdd58596a6f8d842d01c https://github.com/riscv-software-src/riscv-isa-sim.git
   submodule 32eb3295a3c814c1551f94ebc29eed1dec3cb3b1 berkeley-softfloat-3 (32eb329)
 dtc 8f48565e5cfedc74d3f7512f1e0188e9d85dc1de https://git.kernel.org/pub/scm/utils/dtc/dtc.git (v1.8.1)
