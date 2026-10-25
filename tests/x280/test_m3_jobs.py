@@ -266,12 +266,11 @@ def _job(name, env, timeout=60):
 
 
 def test_demo_m3_refuses_under_chip_safe_cpus(tmp_path):
-    """verify:all D9: as demo_m2.sh, the M3 demo (rt_sim on CPU 2, x280d on CPU 5) never runs in a session confined
-    to the non-real-time cores; it stops before exec'ing demo.sh."""
+    """verify:all D9: the M3 demo (rt_sim on CPU 2, x280d on CPU 5) never runs in a session confined to the
+    non-real-time cores; it stops before exec'ing demo.sh."""
     env = {**os.environ, "CHIP_SAFE_CPUS": "0,1", "DEMO_ARGS": "--definitely-not-a-demo-flag"}
-    for job in ("demo_m3.sh", "demo_m2.sh"):
-        r = subprocess.run(["bash", str(JOBS / job)], env=env, capture_output=True, text=True, timeout=30)
-        assert r.returncode == 2 and "CHIP_SAFE_CPUS=0,1 is set" in r.stderr and "needs the real-time cores" in r.stderr
+    r = subprocess.run(["bash", str(JOBS / "demo_m3.sh")], env=env, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 2 and "CHIP_SAFE_CPUS=0,1 is set" in r.stderr and "needs the real-time cores" in r.stderr
 
 
 def test_m3_eval_refuses_a_soak_the_tick_ring_cannot_hold(tmp_path):
@@ -297,7 +296,6 @@ def _safe_env(tmp_path, **kw) -> dict:
 
 @pytest.mark.parametrize("job,kw", [
     ("m3_eval.sh", {}),                        # T-3.7: the rt soak
-    ("m3_eval.sh", {"M3_EVAL_MODE": "sync"}),  # the screen after the sync smoke is still eval_paired --mode rt
     ("m3_faults.sh", {}),                      # T-3.8
     ("m3_shadow.sh", {}),                      # T-3.6
     ("m3_soak.sh", {}),                        # T-3.9
@@ -311,8 +309,8 @@ def test_m3_rt_jobs_refuse_chip_safe_cpus(tmp_path, job, kw):
 
 
 def test_m3_sync_smokes_still_run_under_chip_safe_cpus(tmp_path):
-    """The CPU smoke switches (no rt loop, no screen) get past the refusal and stop at their next check."""
-    r = _job("m3_eval.sh", _safe_env(tmp_path, M3_EVAL_MODE="sync", M3_SKIP_SCREEN=1))
+    """The CPU smoke switches (no rt loop) get past the refusal and stop at their next check."""
+    r = _job("m3_eval.sh", _safe_env(tmp_path, M3_EVAL_MODE="sync"))
     assert r.returncode == 2 and "real-time" not in r.stderr and "set M3_T23_BENCH" in r.stderr, r.stderr[-2000:]
     r = _job("m3_shadow.sh", _safe_env(tmp_path, M3_SHADOW_MODE="sync"))
     assert r.returncode == 2 and "real-time" not in r.stderr and "does not answer ping" in r.stderr, r.stderr[-2000:]
@@ -416,7 +414,7 @@ def test_m3_eval_job_end_to_end_in_sync_mode(tmp_path, servers):
     tick ring dumped into the session dir through --via, analyze_run's heartbeat gate computed from it (data, not
     'no data'), and t37_summary.json. The sync run fails m3_rt's timing rows (expected: T-3.7 is the rt run)."""
     env = _job_env(tmp_path, CHIP_X280_URL=servers["x280"], CHIP_VLA_URL=servers["vla"], M3_EVAL_MODE="sync",
-                   M3_EVAL_EPISODES=1, M3_EVAL_MAX_TICKS=60, M3_SKIP_SCREEN=1, M3_EVAL_LOOP_ARGS="--wbc-timeout-ms 100",
+                   M3_EVAL_EPISODES=1, M3_EVAL_MAX_TICKS=60, M3_EVAL_LOOP_ARGS="--wbc-timeout-ms 100",
                    M3_T23_BENCH=_bench(tmp_path))
     r = _job("m3_eval.sh", env, timeout=900)
     sd = Path(env["CHIP_SESSION_DIR"])
@@ -788,7 +786,8 @@ def test_t39_gates_and_swap_da(tmp_path):
     assert ar.load_gates(tmp_path / "g.yaml", "t39") == {"period_p99_ms": 21.0, "slips_max": 0,
                                                        "wbc_fallback_frac_max": 0.0}
     nan = float("nan")
-    # X280 -> ORT -> GPU -> X280: the remote side's ORT shadow, and the sum of both through ORT for GPU -> X280
+    # X280 -> ORT -> another remote (wbc_be 1) -> X280: the remote side's ORT shadow, and the sum of both through ORT
+    # for a remote -> remote swap
     be = [2, 2, 0, 0, 1, 1, 2, 2]
     sd = [7e-3, 6e-3, nan, nan, 1e-5, 2e-5, 5e-3, 5e-3]
     s = M.swap_da(_ticks(tmp_path, be, sd))
@@ -843,7 +842,7 @@ def test_t39_summary_rows(tmp_path):
     r = subprocess.run([sys.executable, str(M3J), "t39-summary", str(v), str(ticks), str(before), str(after), "95",
                         "165", "0", str(out), str(good)], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
-    # X280-only soak (the default since 2026-10-25, no GPU WBC in M3): no swap row to gate, even with no swap in ticks
+    # X280-only soak (the default since 2026-10-25): no swap row to gate, even with no swap in ticks
     flat = _ticks(tmp_path, [2, 2, 2, 2, 2], [7e-3] * 5)
     assert not M.t39_summary(v, flat, before, after, [good], 95.0, 165.0, 0)["pass"]  # swaps expected, none found
     s = M.t39_summary(v, flat, before, after, [good], 95.0, 165.0, 0, swaps=False)

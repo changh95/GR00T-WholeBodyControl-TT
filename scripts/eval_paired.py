@@ -2,15 +2,15 @@
 """Paired success evaluation of loop arms over common seeds (PLAN.md §4.4; DP10: 50 paired episodes per arm,
 gate only gross drops).
 
-    simpy $RT/scripts/eval_paired.py --matrix $RT/configs/eval_m1_primary.yaml [--out DIR] [--procs N]
+    simpy $RT/scripts/eval_paired.py --matrix MATRIX.yaml [--out DIR] [--procs N]
         [--block N] [--seeds 2000-2049] [--resume] [--dry-run] [--loop-cmd "CMD"]
     simpy $RT/scripts/eval_paired.py --report-only C1=DIR[,DIR...] C4=DIR [--compare C4,C1] [--matrix M] --out DIR
 
 Matrix YAML (only `name` and `arms` are required):
 
-    name: m1_primary          # run tags are <name>_<arm>
+    name: m3_primary          # run tags are <name>_<arm>
     seeds: "2000-2049"        # "A-B", "A-B,C,D-E" or a YAML list of ints; default 2000-2049
-    common_args: "--vla tcp://127.0.0.1:5565 --wbc tcp://127.0.0.1:5556 --crn"
+    common_args: "--vla tcp://127.0.0.1:5557 --wbc tcp://127.0.0.1:5558 --crn"
     procs: 1                  # loop processes at once (VL matrices may use more; RT timing needs 1)
     block: 10                 # seeds per loop invocation; blocks interleave across arms (0 = all seeds at once)
     max_ticks: 1440           # time-to-success censoring

@@ -18,7 +18,7 @@ m1_rt:
   inflight_max: 1
   starved_ticks_max: 0
   safety_faults_max: 0
-  vla_p50_ms_max: 71.5         # 1.1 x 65 ms (idle paced 5090)
+  vla_p50_ms_max: 71.5         # 1.1 x 65 ms (the M1 GPU baseline, idle paced)
 m1_negctl:                     # expected to FAIL m1_rt: WBC behind the VLA on one REP socket
   wbc_rtt_over20_or_timeout_frac_min: 0.03
 m1_sim_smoke:                  # mock VLA + ORT WBC, no viewer (CI-style smoke)
@@ -30,10 +30,10 @@ m1_sim_smoke:                  # mock VLA + ORT WBC, no viewer (CI-style smoke)
   safety_faults_max: 0
 
 # m2_rt (T-2.6, T-2.8): the T-1.4 timing rows of m1_rt with d p99 <= 3, starvation <= 0.1% with no starved run over
-# 10 ticks, 0 TT error replies, 0 hangs (VLA timeouts), VLA p50 <= 1.1 x the T-2.3 server p50. Merged from
-# configs/gates_m2.proposed.yaml. Not here on purpose: m1_rt's starved_ticks_max 0 (M2 allows 0.1%) and d_p50_in
-# (TT d p50 is unmeasured). vla_p50_ms is the server's service time; 49.5 = 1.1 x the projected 45 ms server total,
-# and jobs/t2_soak.sh re-derives it per session from the measured T-2.3 bench (rttt/m2_checks.py gates).
+# 10 ticks, 0 TT error replies, 0 hangs (VLA timeouts), VLA p50 <= 1.1 x the T-2.3 server p50. Not here on purpose:
+# m1_rt's starved_ticks_max 0 (M2 allows 0.1%) and d_p50_in (TT d p50 is unmeasured). vla_p50_ms is the server's
+# service time; 49.5 = 1.1 x the projected 45 ms server total (the T-2.6 soak job re-derived it per session from the
+# measured T-2.3 bench).
 m2_rt:
   period_p99_ms: 21.0
   period_max_ms: 30.0
@@ -57,7 +57,7 @@ m2_rt:
 
 # m3_sim (T-3.3: x280d --backend sim, no device; "All T-1.4 gates; WBC RTT p99 <= 2 ms"). Merged from
 # configs/gates_m3.proposed.yaml with three changes against the proposal: fallbacks <= 0.1% instead of 0, d p99 <= 5
-# (T-1.4) instead of none (§4.2's m3_sim d p99 <= 3 assumes the TT VLA; T-3.3 runs the GPU VLA or the 60 +- 5 ms
+# (T-1.4) instead of none (§4.2's m3_sim d p99 <= 3 assumes the TT VLA; T-3.3 ran the GPU VLA or the 60 +- 5 ms
 # mock, d = 4), and starvation as m2 instead of 0 ticks. shadow 1e-2 is the fp16 bound (T-3.1, T-3.6): fp16 by design
 # differs from ORT by about 7e-3. Viewer rows left out: T-3.3 may run headless, and they fail "no data" without
 # --viewer.

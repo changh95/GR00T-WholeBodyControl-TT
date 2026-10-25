@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Session S4 (b), T-3.7 (PLAN.md WP-3.8, §4.4 M3 screen): closed loop with the X280 driving the legs.
+# Session S4 (b), T-3.7 (PLAN.md WP-3.8): closed loop with the X280 driving the legs.
 #
 #   M3_T23_BENCH=$RT/runs/sessions/20261025_031915_1803710_s1b_t23/t23_bench.json \
 #   X280_E1F_APPROVED=1 CHIP_X280D_SERVE_ARGS="serve --port 5558 --tile 3 --stage0" \
@@ -26,12 +26,9 @@
 #   4  analyze_run.py --gates m3_rt (m3_rt_slow) --gates-file <session copy> --x280-ticks <the dump>.
 #   5  t37_summary.json (m3_jobs.py t37-summary): x280d's own counts across the soak (0 stalls, timeouts, faults,
 #      interlock or degraded replies) and TT p50 >= 0.95 x the T-2.3 span (the gate set holds the <= 1.05 x half).
-#   6  Screen (50 paired, seeds 2000-2049, vs the M2 configuration TT VLA + GPU WBC): eval_paired.py with a session
-#      matrix; gross-drop gate lower 80 % bound >= -25 pts (DP10). M3_SKIP_SCREEN=1 skips it; the GPU WBC must answer
-#      (or T2_START_GPU=1, see jobs/_common.sh).
 # M3_EVAL_MODE=sync is for CPU smoke tests of this job only (tests/x280/test_m3_jobs.py: mock VLA, x280d --backend
-# sim): T-3.7 is the rt run. Under CHIP_SAFE_CPUS the job exits 2 (need_rt_cores) unless it is that sync smoke with
-# M3_SKIP_SCREEN=1: rt_sim --mode rt moves itself onto CPUs 2/3 whatever the session's mask.
+# sim): T-3.7 is the rt run. Under CHIP_SAFE_CPUS the job exits 2 (need_rt_cores) unless it is that sync smoke:
+# rt_sim --mode rt moves itself onto CPUs 2/3 whatever the session's mask.
 # Exit 0 all pass, 1 a gate failed, 2 misconfigured, 3 X280 dirty.
 
 set -uo pipefail
@@ -48,13 +45,8 @@ slow=0
 GATE=$([ $slow = 1 ] && echo m3_rt_slow || echo m3_rt)
 mode=${M3_EVAL_MODE:-rt}
 case $mode in rt | sync) ;; *) job_log "M3_EVAL_MODE=$mode (rt, or sync for smoke tests)"; job_exit 2 ;; esac
-# The soak (rt) and the screen (eval_paired --mode rt, the GPU WBC on CPU 4) run on the real-time cores; only the
-# sync smoke without the screen may run in a session confined to CHIP_SAFE_CPUS.
-if [ "${M3_SKIP_SCREEN:-0}" != 1 ]; then
-    need_rt_cores "rt_sim (CPUs 2/3) and, for the screen, the GPU WBC (CPU 4)"
-elif [ "$mode" = rt ]; then
-    need_rt_cores "rt_sim (CPUs 2/3)"
-fi
+# The soak (rt) runs on the real-time cores; only the sync smoke may run in a session confined to CHIP_SAFE_CPUS.
+[ "$mode" = rt ] && need_rt_cores "rt_sim (CPUs 2/3)"
 episodes=${M3_EVAL_EPISODES:-20}
 max_ticks=${M3_EVAL_MAX_TICKS:-1440}
 if (( episodes * max_ticks >= RING_CALLS )); then
@@ -97,28 +89,6 @@ python3 "$M3J" t37-summary "$run/verdict.json" "$before" "$after" "$CHIP_SESSION
     "$CHIP_SESSION_DIR/t37_summary.json"
 sum_rc=$?
 [ "$sum_rc" = 2 ] && job_exit 2
-screen_rc=0
-if [ "${M3_SKIP_SCREEN:-0}" != 1 ]; then
-    need_gpu_servers wbc
-    matrix=$CHIP_SESSION_DIR/eval_m3_screen.yaml
-    cat >"$matrix" <<EOF
-# T-3.7 screen (PLAN.md §4.4): RT C4 with the WBC on the X280 vs RT C4 with the GPU WBC (the M2 configuration).
-name: m3_screen
-seeds: "2000-2049"
-procs: 1
-block: 10
-max_ticks: 1440
-gross_drop: -0.25
-common_args: "--mode rt --arm v1 --s 16 --B 0 --vla $CHIP_VLA_URL --d-init 3 --crn --max-ticks 1440 ${wbc_to[*]}"
-arms:
-  - {name: C4x280, args: "--wbc $CHIP_X280_URL"}
-  - {name: C4gpu,  args: "--wbc $WBC_GPU"}
-compare:
-  - [C4x280, C4gpu]
-EOF
-    simpy "$RT/scripts/eval_paired.py" --matrix "$matrix" --out "$CHIP_SESSION_DIR/m3_screen"
-    screen_rc=$?
-fi
-job_log "T-3.7: loop rc=$loop_rc, $GATE gates rc=$gate_rc, x280d record + T-2.3 band rc=$sum_rc, screen rc=$screen_rc"
-[ "$loop_rc" = 0 ] && [ "$gate_rc" = 0 ] && [ "$sum_rc" = 0 ] && [ "$screen_rc" = 0 ] && job_exit 0
+job_log "T-3.7: loop rc=$loop_rc, $GATE gates rc=$gate_rc, x280d record + T-2.3 band rc=$sum_rc"
+[ "$loop_rc" = 0 ] && [ "$gate_rc" = 0 ] && [ "$sum_rc" = 0 ] && job_exit 0
 job_exit 1

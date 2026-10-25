@@ -431,7 +431,7 @@ def test_collect_config_default_fields():
 
 
 def synth(n_eps: int = 3, K: int = 320, seed: int = 0):
-    """A run that passes m1_rt: 20 ms +- 0.2 ms ticks, GPU WBC ~0.65 ms, d = 4, VLA 65 ms, one in flight."""
+    """A run that passes m1_rt: 20 ms +- 0.2 ms ticks, a remote WBC ~0.65 ms, d = 4, VLA 65 ms, one in flight."""
     rng = np.random.default_rng(seed)
     ticks = np.zeros(n_eps * K, TICK_DTYPE)
     reqs, eps, seq = [], [], 0
@@ -447,7 +447,7 @@ def synth(n_eps: int = 3, K: int = 320, seed: int = 0):
         t["viewer_us"][0] = 1500
         t["wbc_rtt_us"] = 600 + np.abs(rng.normal(0, 80, K))
         t["wbc_dev_us"] = 150
-        t["wbc_be"] = WbcBackend.GPU
+        t["wbc_be"] = WbcBackend.X280
         t["shadow_da"] = 1e-6
         ep_reqs = [dict(seq=seq, gen=e, ep=e, k_obs=0, k_arr=0, d=0, t_send_ns=t0 - 70_000_000,
                         t_recv_ns=t0 - 5_000_000, outcome=Outcome.APPLIED)]
@@ -883,18 +883,6 @@ def test_eval_bad_matrix(tmp_path):
     p = subprocess.run([sys.executable, str(EVAL), "--matrix", str(matrix), "--dry-run"], capture_output=True,
                        text=True)
     assert p.returncode == 2 and "unknown arm" in p.stderr
-
-
-def test_example_matrices_parse():
-    prim = ev.load_matrix(RT / "configs" / "eval_m1_primary.yaml")
-    assert [a["name"] for a in prim["arms"]] == ["C1", "C4"] and prim["compare"][0]["gate"]
-    assert ev.parse_seeds(prim["seeds"]) == list(range(2000, 2050)) and "--crn" in prim["common_args"]
-    scr = ev.load_matrix(RT / "configs" / "eval_m1_screen.yaml")
-    assert len(scr["arms"]) == 12 and len(ev.parse_seeds(scr["seeds"])) == 50
-    assert [c for c in scr["compare"] if c["gate"]] == [{"new": "C4d4", "ref": "C1", "gate": True}]
-    jobs = ev.plan_jobs(prim, Path("/x"), ["loop"], ev.parse_seeds(prim["seeds"]), 10)
-    assert [j["id"] for j in jobs[:3]] == ["C1_2000-2009", "C4_2000-2009", "C1_2010-2019"]
-    assert jobs[1]["cmd"][-4:] == ["--seeds", "2000-2009", "--tag", "m1_primary_C4"]
 
 
 # --- analyze_run: the M2/M3 keys, operator pauses and resets, the remote shadow, x280d's heartbeat ring -----

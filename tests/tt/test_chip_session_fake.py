@@ -8,7 +8,6 @@ Stubs: tests/tt/chip_fakes.py (x280d, tt-smi, tt_probe, fuser) and tests/tt/fake
 are random free ones, never 5555-5572.
 """
 
-import contextlib
 import json
 import os
 from pathlib import Path
@@ -596,7 +595,7 @@ def fake_gold(tmp_path_factory):
 
 def s1_env(gold: Path, perturb: str) -> dict:
     return {"T2_GOLDEN": str(gold), "T2_BENCH_N": "20", "T2_BENCH_PERIOD_MS": "5", "T2_ABAB_N": "6",
-            "T2_ALLOW_GPU_VLA": "1", "FAKE_G1_PERTURB": perturb,
+            "FAKE_G1_PERTURB": perturb,
             "T2_CHECK_GOLDEN": "0"}  # the fake golden has no full manifest (rttt/check_golden.py needs one)
 
 
@@ -628,8 +627,7 @@ def test_s1_jobs_need_debug_endpoints(fk, fake_gold, job):
     assert r.returncode == 2 and "--debug-endpoints" in r.stdout  # job output reaches the console via its tee
 
 
-@pytest.mark.parametrize("job", ["t2_fidelity.sh", "t2_bench.sh", "t2_abab.sh", "t2_sync.sh", "t2_soak.sh",
-                                 "t2_soak_2h.sh", "t2_primary.sh"])
+@pytest.mark.parametrize("job", ["t2_fidelity.sh", "t2_bench.sh", "t2_abab.sh"])
 def test_jobs_need_a_session_and_a_vla(fk, job):
     env = {k: v for k, v in os.environ.items() if not k.startswith("CHIP_")}
     r = subprocess.run(["bash", str(JOBS / job)], env=env, capture_output=True, text=True, timeout=30)
@@ -750,149 +748,13 @@ def test_status_pub_reaches_server_g1_and_t2_bench(fk, fake_gold):
     assert all(c["pass"] for c in bench["checks"] if c["name"].startswith("status_"))
 
 
-# --- jobs/_common.sh: the GPU servers a job starts (every network and process call stubbed) ------------------------
-
-
-DEAD_URL = "tcp://127.0.0.1:9"  # the discard port: nothing serves it
-
-
-def _common_harness(tmp_path: Path, body: str, env: dict | None = None) -> subprocess.CompletedProcess:
-    """Source jobs/_common.sh, replace every function that would ping, start or wait on a real server with a recorder,
-    then run ``body``. Nothing here reaches :5556 / :5565."""
-    sd = tmp_path / "sd"
-    sd.mkdir(exist_ok=True)
-    (tmp_path / "snap").mkdir(exist_ok=True)
-    script = tmp_path / "harness.sh"
-    script.write_text(f"""source {JOBS / "_common.sh"}
-calls={tmp_path / "calls.txt"}
-ping_url() {{ echo "PING $1" >>"$calls"; return 1; }}
-chip_start() {{ echo "START $1 :: ${{*:3}}" >>"$calls"; CHIP_PID=$$; }}
-chip_wait_ready() {{ echo "WAIT $1" >>"$calls"; return 0; }}
-gpu_vla_snapshot() {{ echo {tmp_path / "snap"}; }}
-{body}
-""")
-    base = {k: v for k, v in os.environ.items() if not k.startswith(("CHIP_", "T2_"))}
-    # The GPU endpoints default to a port nothing listens on: a harness must never reach the real :5556 / :5565.
-    base.update(T2_GPU_VLA=DEAD_URL, T2_WBC=DEAD_URL)
-    return subprocess.run(["bash", str(script)], env=dict(base, CHIP_SESSION_DIR=str(sd), **(env or {})),
-                          capture_output=True, text=True, timeout=60)
-
-
-def test_start_gpu_servers_uses_the_plan_pins_and_the_pinned_revision(tmp_path):
-    """The D15 endpoints (T2_GPU_VLA / T2_WBC empty = $VLA_GPU / $WBC_GPU); safe: ping, start and wait are stubbed."""
-    r = _common_harness(tmp_path, 'start_gpu_servers vla; echo "rc=$?"', env={"T2_GPU_VLA": "", "T2_WBC": ""})
-    assert "rc=0" in r.stdout, r.stdout + r.stderr
-    calls = (tmp_path / "calls.txt").read_text().splitlines()
-    wbc = next(c for c in calls if c.startswith("START wbc_gpu"))
-    vla = next(c for c in calls if c.startswith("START gpu_vla"))
-    assert "rtserve.wbc_gpu_server --port 5556" in wbc and wbc.endswith("--cpus 4 --spin")  # T-1.4: busy-poll
-    assert "rtserve.gpu_vla_server --port 5565" in vla and "--cpus 12,13,14,15" in vla and "HF_HUB_OFFLINE=1" in vla
-    assert f"--model {tmp_path / 'snap'}" in vla and "--log " in vla
-    assert "--noise cpu" in vla  # D3: the GPU arm draws server_g1's noise for a noise_seed
-
-
-def test_start_gpu_servers_follows_the_job_endpoints(tmp_path):
-    r = _common_harness(tmp_path, 'start_gpu_servers pair; echo "rc=$?"',
-                        env={"T2_GPU_VLA": "tcp://127.0.0.1:41001", "T2_WBC": "ort"})
-    assert "rc=0" in r.stdout, r.stdout + r.stderr
-    calls = (tmp_path / "calls.txt").read_text().splitlines()
-    assert not any(c.startswith("START wbc_gpu") for c in calls)  # 'ort': the loop's WBC, no server
-    assert "--port 41001" in next(c for c in calls if c.startswith("START gpu_vla"))
-
-
-def test_start_gpu_servers_refuses_under_chip_safe_cpus(tmp_path):
-    cpus = ",".join(map(str, _allowed_cpus()))
-    r = _common_harness(tmp_path, 'start_gpu_servers vla; echo "rc=$?"', env={"CHIP_SAFE_CPUS": cpus})
-    assert "rc=1" in r.stdout and "real-time cores" in r.stderr, r.stdout + r.stderr
-    assert not (tmp_path / "calls.txt").exists()  # refused before any ping or start
-
-
-SRC = {"model": "cloudwalk-research/GR00T-N1.6-G1-PnPAppleToPlate",
-       "revision": "2a5b61cc7660bdef4cf17ad18dc5dd97f13e4ce5"}
-
-
-@contextlib.contextmanager
-def _info_standin(info: dict, randn_calls: int = 1):
-    """A GPU-VLA stand-in on a random port, until the block ends: get_action replies [{}, reply info] as
-    gpu_vla_server does (noise / randn_calls with a noise_seed under --noise cpu); anything else gets INFO."""
-    import threading
-
-    import msgpack
-    import zmq
-
-    from rtloop import wire
-
-    ctx = zmq.Context()
-    rep = ctx.socket(zmq.REP)
-    port = rep.bind_to_random_port("tcp://127.0.0.1")
-    stop = threading.Event()
-
-    def serve():
-        while not stop.is_set():
-            if rep.poll(50):
-                req = wire.loads(rep.recv())
-                if req.get("endpoint") == "get_action":
-                    seed = ((req.get("data") or {}).get("options") or {}).get("rt", {}).get("noise_seed")
-                    extra = {"noise": "cpu", "randn_calls": randn_calls} if info.get("noise") == "cpu" else {}
-                    rep.send(msgpack.packb([{}, {"noise_seed": seed, **(extra if seed is not None else {})}]))
-                else:
-                    rep.send(msgpack.packb(info))
-
-    t = threading.Thread(target=serve)
-    t.start()
-    try:
-        yield f"tcp://127.0.0.1:{port}"
-    finally:
-        stop.set()
-        t.join(5)
-        rep.close(0)
-        ctx.term()
-
-
-@pytest.mark.parametrize("revision,rc", [("2a5b61cc7660bdef4cf17ad18dc5dd97f13e4ce5", 0), ("0" * 40, 1)])
-def test_check_gpu_vla_revision(tmp_path, revision, rc):
-    """need_gpu_servers refuses a GPU arm that does not serve DP1 at the revision the TT BF16 copy came from
-    (review:tt issue 7); here against a stand-in on a random port."""
-    with _info_standin(dict(SRC, revision=revision, backend="cuda:x")) as url:
-        r = _common_harness(tmp_path, 'check_gpu_vla_revision; echo "rc=$?"', env={"T2_GPU_VLA": url})
-    assert f"rc={rc}" in r.stdout, r.stdout + r.stderr
-    assert json.loads((tmp_path / "sd" / "gpu_vla_info.json").read_text())["revision"] == revision
-
-
-@pytest.mark.parametrize("noise,calls,rc", [("cpu", 1, 0), ("cuda", 1, 4), (None, 1, 4), ("cpu", 2, 4)])
-def test_check_gpu_vla_revision_reads_the_noise_mode(tmp_path, noise, calls, rc):
-    """D3: with a noise argument, info.noise must be it (None = a gpu_vla_server older than --noise, T-1.10's), and a
-    seeded get_action must report that noise from exactly one draw (two: the action head's was not the seeded one)."""
-    info = dict(SRC, backend="cuda:x", **({"noise": noise} if noise else {}))
-    with _info_standin(info, randn_calls=calls) as url:
-        r = _common_harness(tmp_path, 'check_gpu_vla_revision cpu; echo "rc=$?"', env={"T2_GPU_VLA": url})
-    assert f"rc={rc}" in r.stdout, r.stdout + r.stderr
-    assert ("NOT 'cpu'" in r.stderr) is (rc == 4)
-    saved = json.loads((tmp_path / "sd" / "gpu_vla_info.json").read_text())
-    assert ("noise_probe" in saved) is (noise == "cpu")
-    if noise == "cpu":
-        assert saved["noise_probe"] == {"noise": "cpu", "randn_calls": calls}
-
-
-@pytest.mark.parametrize("noise", ["cuda", None])
-def test_a_tt_vs_gpu_job_refuses_an_unpaired_gpu_vla(tmp_path, noise):
-    """need_gpu_servers pair (T-2.5, T-2.7) exits 2 with the fix in the message; a GPU-only check (vla) passes."""
-    info = dict(SRC, backend="cuda:x", **({"noise": noise} if noise else {}))
-    body = 'ping_url() { return 0; }\nneed_gpu_servers {}; echo "reached"'
-    with _info_standin(info) as url:
-        env = {"T2_GPU_VLA": url, "T2_WBC": "ort"}
-        pair = _common_harness(tmp_path, body.replace("{}", "pair"), env=env)
-        plain = _common_harness(tmp_path, body.replace("{}", "vla"), env=env)
-    assert pair.returncode == 2 and "reached" not in pair.stdout, pair.stdout + pair.stderr
-    assert "does not draw server_g1's noise" in pair.stderr and "--noise cpu" in pair.stderr
-    assert plain.returncode == 0 and "reached" in plain.stdout, plain.stderr
-
-
-def test_a_tt_vs_gpu_job_accepts_a_paired_gpu_vla(tmp_path):
-    with _info_standin(dict(SRC, backend="cuda:x", noise="cpu")) as url:
-        r = _common_harness(tmp_path, 'ping_url() { return 0; }\nneed_gpu_servers pair; echo "reached"',
-                            env={"T2_GPU_VLA": url, "T2_WBC": "ort"})
-    assert r.returncode == 0 and "reached" in r.stdout, r.stderr
+def test_nothing_in_the_s1b_path_assumes_s1s_port():
+    """S1 served on :5577 to stay clear of the RT campaign; S1b uses the default :5557 (CHIP_VLA_PORT)."""
+    for d in ("jobs", "scripts", "rttt", "configs"):
+        for p in (RT / d).iterdir():
+            if p.suffix in (".sh", ".py", ".yaml"):
+                assert "5577" not in p.read_text(), p
+    assert 'CHIP_VLA_PORT:=5557' in (RT / "scripts" / "chip_lib.sh").read_text()
 
 
 # --- D6: server_g1 starts inside its --cpus with one-thread library pools -------------------------------------------
