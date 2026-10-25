@@ -1,7 +1,7 @@
 """Blackhole X280 register map for x280d: the ONLY source of addresses, NoC coordinates, register
 offsets and expected values used by the host access layer (PLAN.md WP-3.3, §1.4.4, §5.2).
 
-Every number carries a citation. Source tags (paths relative to RT = ~/experiments/gr00t/rtloop):
+Every number carries a citation. Source tags (paths relative to RT = ~/experiments/GR00T-WholeBodyControl-TT):
   ISA  third_party_refs/tt-isa-documentation/BlackholeA0          (0610df6, SHAS.txt)
   KMD  third_party_refs/tt-kmd-2.11.0                             (c05f224)
   FW   third_party_refs/fw-19.12.0/lib/tenstorrent/bh_arc         (fe27c0e, = installed CMFW 19.12)

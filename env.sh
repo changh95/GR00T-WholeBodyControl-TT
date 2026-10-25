@@ -1,11 +1,12 @@
-# Source this file: `source ~/experiments/gr00t/rtloop/env.sh`.
+# Source this file: `source ~/experiments/GR00T-WholeBodyControl-TT/env.sh` (or a snapshot's own env.sh).
 #
 # Paths, ports and the interpreter wrappers used by every rtloop command (PLAN.md §0 "Interpreters
 # and wrappers"). The sim side (simpy) must never create a CUDA context: doing so corrupts its EGL
 # renders, so CUDA is hidden there and EGL is pointed at GPU 0 explicitly (robosuite's EGL init
 # crashes on an empty CUDA_VISIBLE_DEVICES without MUJOCO_EGL_DEVICE_ID).
 
-export RT=$HOME/experiments/gr00t/rtloop
+# RT is the tree this file lives in: the repo, or a snapshot under snapshots/ (scripts/snapshot.sh).
+export RT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 export R=$HOME/experiments/gr00t/Isaac-GR00T-n1.6
 export W=$R/external_dependencies/GR00T-WholeBodyControl
 export DEV=$HOME/experiments/gr00t/bin/with-device.sh

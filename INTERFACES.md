@@ -10,7 +10,7 @@ files named there stay authoritative.
 
 ## Conventions
 
-- Run everything through the wrappers in `env.sh` (`source ~/experiments/gr00t/rtloop/env.sh`):
+- Run everything through the wrappers in `env.sh` (`source ~/experiments/GR00T-WholeBodyControl-TT/env.sh`):
   `simpy` = sim/client venv (CUDA hidden, EGL on GPU 0; has torch CPU, onnxruntime 1.23, pyzmq,
   msgpack, numpy 1.26, pytest), `srvpy` = server venv (CUDA torch, onnx, pyzmq; **no
   onnxruntime**). Both run with `cd $R` and `PYTHONPATH=$RT:$R`.
@@ -19,7 +19,7 @@ files named there stay authoritative.
   GPU or a sim env are marked `@pytest.mark.gpu` / `@pytest.mark.sim` (registered in
   `tests/conftest.py`).
 - **Never** stop, restart or send `kill` to the server on 127.0.0.1:5555. Do not open the
-  Tenstorrent device. Do not edit files outside `~/experiments/gr00t/rtloop/`.
+  Tenstorrent device. Do not edit files outside `~/experiments/GR00T-WholeBodyControl-TT/`.
 - Times are `time.monotonic_ns()` (CLOCK_MONOTONIC) ints. Ticks are ints. Arrays crossing an
   interface are float32 unless stated.
 - Style: plain modules, type hints, short docstrings that say *why*; no frameworks. Keep the

@@ -20,7 +20,7 @@ Full-resolution recordings (1920x1080): [seed 2000, success at tick 854](https:/
 |---|---|---|---|
 | M1 | RTX 5090 | RTX 5090 (CUDA graph) | done: async loop costs no success (T-1.9), RT timing 18/18 (T-1.4) |
 | M2 | Blackhole Tensix | RTX 5090 | done: TT vs GPU no success drop (T-2.5, T-2.7), 2 h RT soak 20/20 (T-2.8) |
-| M3 | Blackhole Tensix | Blackhole X280 (L2CPU3) | closed loop 21/21 (T-3.7), no success drop vs GPU WBC, fault recovery passes (T-3.8); 2 h soak (T-3.9) in progress |
+| M3 | Blackhole Tensix | Blackhole X280 (L2CPU3) | done: closed loop 21/21 (T-3.7), no success drop vs GPU WBC, fault recovery (T-3.8), 107 min soak with 0 WBC fallbacks (T-3.9) |
 | next | | X280, 4 tiles x up to 4 harts | single-hart kernel done (v3, 0.278 ms); next tensor-parallel across L2CPU0-3 |
 
 Results: `docs/plan/vla-wbc-x280/results/` (M1.md, M2.md, M3.md). Design and test plan: `docs/plan/vla-wbc-x280/PLAN.md`.
@@ -34,11 +34,17 @@ Module contracts: `INTERFACES.md`. Test suites and how to run them: `TESTING.md`
   host layer (`host/kmd.py`, `host/wcio.c`), register map and write allowlist (`regs.py`), daemon (`x280d.py`), simulators
 - `scripts/` demo, HUD, chip sessions, analysis; `jobs/` device-session jobs; `tests/` CPU, sim, spike and fake-device suites
 - `third_party_refs/SHAS.txt`, `x280/refs/SOURCES.txt`: the upstream sources the code cites (fetch them; not vendored)
+- `docs/plan/vla-wbc-x280/`: plan, results (M1-M3), research; `docs/media/`: the README GIF (the MP4s are on the release)
+- not tracked: `runs/` (every session's logs, ticks and recordings), `snapshots/` (frozen worktrees for device sessions)
 
 ## Setup
 
-`source env.sh` defines the interpreter wrappers (`simpy`, `srvpy`, `ttpy`, `xpy`), ports and paths. Device access
-goes only through the guarded wrappers `$DEV` / `$DEVX` (`chip_session.sh`); every X280 hold resets the chip after.
+Clone to `~/experiments/GR00T-WholeBodyControl-TT`. `source env.sh` defines the interpreter wrappers (`simpy`,
+`srvpy`, `ttpy`, `xpy`), ports and paths; `RT` is the tree `env.sh` lives in. The external inputs (Isaac-GR00T N1.6
+and its sim venv, the tt-metal megakernel snapshot, goldens, the device guard) stay under `~/experiments/gr00t/` and are
+named in `env.sh`. Device access goes only through the guarded wrappers `$DEV` / `$DEVX` (`chip_session.sh`); every X280
+hold resets the chip after. Device sessions run from a frozen worktree: `scripts/snapshot.sh NAME`, then
+`source snapshots/NAME/env.sh` and `$DEVX $RT/scripts/chip_session.sh ...`.
 
 ## Findings worth knowing
 

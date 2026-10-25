@@ -2,7 +2,7 @@
 
 How to run each test, what it checks (test ids are from `~/experiments/gr00t/docs/plan/vla-wbc-x280/PLAN.md`
 §2), and the result of the last full run (RTX 5090, Ryzen 9 7950X). Every command assumes
-`source ~/experiments/gr00t/rtloop/env.sh`, which defines `simpy`, `srvpy`, `ttpy`, `xpy`, `$RT`, `$R` and the ports.
+`source ~/experiments/GR00T-WholeBodyControl-TT/env.sh`, which defines `simpy`, `srvpy`, `ttpy`, `xpy`, `$RT`, `$R` and the ports.
 
 **CPUs.** Background work (tests, builds, agents) stays off the real-time CPUs of §1.1 (2-4, 6, 7, 12-15) and their
 SMT siblings (18-20, 22, 23, 28-31), and off 5/21 (x280d): `BG="nice -n 10 taskset -c 0,1,8-11,16,17,24-27"` below.

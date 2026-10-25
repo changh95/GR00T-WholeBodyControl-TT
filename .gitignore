@@ -15,3 +15,6 @@ generated/
 prototypes/serving/obs_reset.pkl
 # GPL-2.0 reference copy: fetch it from the URL in x280/refs/SOURCES.txt (sha256 listed there)
 x280/refs/linux-*.c
+# frozen copies for device sessions (scripts/snapshot.sh: git worktrees) and full-resolution recordings (GitHub release)
+snapshots/
+docs/media/*.mp4
