@@ -305,7 +305,7 @@ def test_s4_and_t38_jobs_in_one_stage0_hold(session, tmp_path):
               "--job", JOBS / "m3_faults.sh", "--tag", "s4", timeout=1200,
               M3_SHADOW_MODE="sync", M3_SHADOW_EPISODES=1, M3_SHADOW_MAX_TICKS=60,
               M3_SHADOW_LOOP_ARGS="--shadow-timeout-ms 100", M3_EVAL_MODE="sync", M3_EVAL_EPISODES=1,
-              M3_EVAL_MAX_TICKS=60, M3_SKIP_SCREEN=1, M3_EVAL_LOOP_ARGS="--wbc-timeout-ms 100", M3_T23_BENCH=bench,
+              M3_EVAL_MAX_TICKS=60, M3_EVAL_LOOP_ARGS="--wbc-timeout-ms 100", M3_T23_BENCH=bench,
               M3_LOOP_MODULE=STUB_LOOP, M3_FAULT_GAP_S=3, M3_FAULT_DURATION=30, M3_STUB_SLEEP_S=30)
     assert r.returncode == 3, _fail(r)
     t36 = s.json("t36_summary.json")
@@ -332,13 +332,13 @@ def test_s4_and_t38_jobs_in_one_stage0_hold(session, tmp_path):
 
 def test_t39_soak_job_on_a_stage0_session(session):
     """jobs/m3_soak.sh: demo.sh m3 --in-session with the stub loop on the session's x280d (stage 0) and VLA, WBC
-    swapped every 2 s (x280 sim <-> ORT, --no-alt), then T-3.9's rows: the t39 gates and the x280d / swap / PLL4
+    swapped every 2 s (x280 sim <-> ORT), then T-3.9's rows: the t39 gates and the x280d / swap / PLL4
     summary from x280d's own status log."""
     pytest.importorskip("yaml")
     s = session()
     r = s.run("--x280", "boot:3", "--vla", "tt", "--job", JOBS / "m3_soak.sh", "--tag", "t39", timeout=600,
               DEMO_LOOP_MODULE=STUB_LOOP, M3_SOAK_DURATION=14, M3_SOAK_SWAP_S=2,
-              M3_SOAK_DEMO_ARGS="--no-viewer --no-alt")
+              M3_SOAK_DEMO_ARGS="--no-viewer")
     assert r.returncode == 0, _fail(r)
     sm = s.json("t39_summary.json")
     assert sm["pass"] and sm["gates_pass"] and sm["x280d_ok"] and sm["x280d_during_soak"]["calls"] > 0, sm
@@ -359,7 +359,7 @@ def test_t39_soak_job_fails_a_fallback_and_a_large_swap_jump(session):
     s = session()
     r = s.run("--x280", "boot:3", "--vla", "tt", "--job", JOBS / "m3_soak.sh", "--tag", "t39", timeout=600,
               DEMO_LOOP_MODULE=STUB_LOOP, M3_SOAK_DURATION=12, M3_SOAK_SWAP_S=2,
-              M3_SOAK_DEMO_ARGS="--no-viewer --no-alt", M3_STUB_FALLBACKS=3, M3_STUB_SHADOW_DA=0.02)
+              M3_SOAK_DEMO_ARGS="--no-viewer", M3_STUB_FALLBACKS=3, M3_STUB_SHADOW_DA=0.02)
     assert r.returncode == 1, _fail(r)
     sm = s.json("t39_summary.json")
     assert not sm["pass"] and not sm["gates_pass"] and not sm["swap_da"]["pass"] and sm["pll4"]["pass"], sm
@@ -370,7 +370,7 @@ def test_demo_m3_job_on_a_stage0_session(session):
     the stub loop, the session's VLA and x280d."""
     s = session()
     url_v, url_x = f"tcp://127.0.0.1:{s.vla_port}", f"tcp://127.0.0.1:{s.x280_port}"
-    demo_args = f"--no-viewer --no-alt --duration 3 --vla {url_v} --wbc {url_x} --tag d3 -- --runs-root {s.tmp / 'runs'}"
+    demo_args = f"--no-viewer --duration 3 --vla {url_v} --wbc {url_x} --tag d3 -- --runs-root {s.tmp / 'runs'}"
     r = s.run("--x280", "boot:3", "--vla", "tt", "--job", JOBS / "demo_m3.sh", timeout=300,
               DEMO_ARGS=demo_args, DEMO_LOOP_MODULE=STUB_LOOP, DEMO_LOG_ROOT=s.tmp / "demo_logs")
     assert r.returncode == 0, _fail(r)

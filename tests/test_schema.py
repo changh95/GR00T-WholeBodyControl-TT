@@ -59,11 +59,11 @@ def test_chunk_to_record():
     rng = np.random.default_rng(0)
     rows = rng.standard_normal((H, A35)).astype(np.float32)
     c = Chunk(seq=7, gen=3, k_obs=100, rows=rows, t_obs_ns=1, t_send_ns=2, t_recv_ns=3, k_arr=104,
-              vla_be=schema.VlaBackend.GPU, status=schema.ChunkStatus.OK)
+              vla_be=schema.VlaBackend.TT, status=schema.ChunkStatus.OK)
     rec = c.to_record()
     assert rec.dtype == CHUNK_DTYPE and rec.tobytes().__len__() == 4264
     assert (int(rec["seq"]), int(rec["gen"]), int(rec["k_obs"]), int(rec["k_arr"]), int(rec["d"])) == (7, 3, 100, 104, 4)
-    assert int(rec["vla_be"]) == 1 and int(rec["status"]) == 0
+    assert int(rec["vla_be"]) == 2 and int(rec["status"]) == 0
     np.testing.assert_array_equal(rec["rows"], rows)
 
 

@@ -185,16 +185,16 @@ WBC_POLICIES = (WBC_BALANCE, WBC_WALK)
 WALK_THRESHOLD = 0.05  # |nav cmd| below this selects Balance (g1_gear_wbc_policy.py:257)
 
 
-class WbcBackend(enum.IntEnum):
+class WbcBackend(enum.IntEnum):  # TickLog wbc_be
     ORT = 0
-    GPU = 1
+    OTHER = 1  # a W-WBC server that is not x280d (a stock PolicyServer has no info endpoint)
     X280 = 2
     X280_SIM = 3
 
 
-class VlaBackend(enum.IntEnum):
+class VlaBackend(enum.IntEnum):  # ChunkRecord vla_be
     MOCK = 0
-    GPU = 1
+    OTHER = 1  # a W-VLA server that names no known backend (a stock PolicyServer has no info endpoint)
     TT = 2
 
 

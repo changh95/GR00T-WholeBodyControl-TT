@@ -1,9 +1,11 @@
 """Synthetic rt_sim telemetry for the HUD tests: real TICK_DTYPE rows through telemetry.tick_msg and the
 real telemetry.Publisher, so the HUD is tested against exactly the bytes the loop sends.
 
-The stream imitates M1 timing: 20 ms ticks, ~7 ms compute with an overrun every 97 ticks, a VLA request every
-16 ticks answered 4 ticks later (d = 4), an ego thumbnail per request, meta at 1 Hz, Walk every other 200
-ticks, a starved stretch in episode 1. Usable as a thread (tests) or a script (preview):
+The stream imitates the T-3.3 timing (the 60 +- 5 ms mock VLA): 20 ms ticks, ~7 ms compute with an overrun every 97
+ticks, a VLA request every 16 ticks answered 4 ticks later (d = 4), an ego thumbnail per request, meta at 1 Hz, Walk
+every other 200 ticks, a starved stretch in episode 1. Profiles: "sim" (the mock VLA and the x280d sim, nothing on
+the chip: `demo.sh m3 --x280-sim --vla <mock>`) and "m3" (Tensix VLA, X280 WBC). Usable as a thread (tests) or a
+script (preview):
 
     simpy tests/hud/synth_pub.py --url tcp://127.0.0.1:* --seconds 5
 """
@@ -19,17 +21,15 @@ from rtloop import telemetry
 from rtloop.schema import TICK_DTYPE
 
 META = {
-    "m1": {"sim": "host-cpu", "vla": "cuda:rtx5090:cloudwalk-research/GR00T-N1.6-G1-PnPAppleToPlate@2a5b61cc",
-           "wbc": "cuda-graph:rtx5090"},
-    "m2": {"sim": "host-cpu", "vla": "tt:p150a:cloudwalk-research/GR00T-N1.6-G1-PnPAppleToPlate-bf16@2a5b61cc",
-           "wbc": "cuda-graph:rtx5090"},
+    "sim": {"sim": "host-cpu", "vla": "mock:detfn", "wbc": "x280-sim:v3-fp16"},
     "m3": {"sim": "host-cpu", "vla": "tt:p150a:cloudwalk-research/GR00T-N1.6-G1-PnPAppleToPlate-bf16@2a5b61cc",
            "wbc": "x280:l2cpu3:h0@800MHz"},
 }
 # rt_sim's meta `targets` (the loop's swap targets: its own backends plus --vla-alt / --wbc-alt), as demo.sh configures
-# them: m2 with the GPU VLA as the key-v alternative, m3 as `demo.sh m3 --no-alt` (nothing on the GPU).
-TARGETS = {"m1": {"vla": ["gpu"], "wbc": ["gpu", "ort"]}, "m2": {"vla": ["tt", "gpu"], "wbc": ["gpu", "ort"]},
-           "m3": {"vla": ["tt"], "wbc": ["x280", "ort"]}}
+# them: the primary and ORT.
+TARGETS = {"sim": {"vla": ["mock"], "wbc": ["x280_sim", "ort"]}, "m3": {"vla": ["tt"], "wbc": ["x280", "ort"]}}
+CURRENT = {"sim": {"vla": "mock", "wbc": "x280_sim"}, "m3": {"vla": "tt", "wbc": "x280"}}
+WBC_BE = {"sim": 3, "m3": 2}  # rtloop.schema.WbcBackend X280_SIM, X280
 
 
 def ego_image(seq: int) -> np.ndarray:
@@ -44,7 +44,7 @@ def ego_image(seq: int) -> np.ndarray:
 class SynthStream:
     """Generates (topic, fields) in loop order for ep 0.. with `ticks_per_ep` ticks each."""
 
-    def __init__(self, ticks_per_ep: int = 600, profile: str = "m1", s: int = 16, d: int = 4, seed0: int = 1000):
+    def __init__(self, ticks_per_ep: int = 600, profile: str = "sim", s: int = 16, d: int = 4, seed0: int = 1000):
         self.ticks_per_ep, self.profile, self.s, self.d, self.seed0 = ticks_per_ep, profile, s, d, seed0
         self.row = np.zeros((), dtype=TICK_DTYPE)
         self.seq = 0
@@ -81,7 +81,7 @@ class SynthStream:
             r["viewer_us"] = 900.0
             r["wbc_rtt_us"] = 610.0 + 50.0 * math.sin(k)
             r["wbc_dev_us"] = 410.0
-            r["wbc_be"] = 2 if self.profile == "m3" else 1
+            r["wbc_be"] = WBC_BE[self.profile]
             r["wbc_fb"] = 1 if k % 211 == 100 else 0
             if r["wbc_fb"]:
                 r["wbc_be"] = 0
@@ -103,10 +103,8 @@ class SynthStream:
             if k % 50 == 0:
                 yield "meta", {"processor": META[self.profile], "ep": ep, "k": k, "mode": "rt",
                                "rt_factor": 0.999, "seed": self.seed0 + ep,
-                               "current": {"vla": "gpu" if self.profile == "m1" else "tt",
-                                           "wbc": {"m1": "gpu", "m2": "gpu", "m3": "x280"}[self.profile]},
-                               "targets": TARGETS[self.profile],
-                               "endpoints": {"vla": "tcp://127.0.0.1:5565", "wbc": "tcp://127.0.0.1:5556"}}
+                               "current": CURRENT[self.profile], "targets": TARGETS[self.profile],
+                               "endpoints": {"vla": "tcp://127.0.0.1:5557", "wbc": "tcp://127.0.0.1:5558"}}
 
 
 def publish(pub: telemetry.Publisher, item) -> None:
@@ -128,7 +126,7 @@ class SynthPublisher(threading.Thread):
     stalled loop) until stop()."""
 
     def __init__(self, url: str = "tcp://127.0.0.1:*", rate_hz: float = 50.0, n_ticks: int = 10**9,
-                 stall_after: int | None = None, profile: str = "m1", ticks_per_ep: int = 600, hwm: int = 100):
+                 stall_after: int | None = None, profile: str = "sim", ticks_per_ep: int = 600, hwm: int = 100):
         super().__init__(daemon=True)
         self.pub = telemetry.Publisher(url, hwm=hwm)
         self.url = self.pub.url
@@ -171,7 +169,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="tcp://127.0.0.1:*")
     ap.add_argument("--seconds", type=float, default=5.0)
-    ap.add_argument("--profile", default="m1", choices=sorted(META))
+    ap.add_argument("--profile", default="sim", choices=sorted(META))
     args = ap.parse_args()
     p = SynthPublisher(args.url, profile=args.profile)
     print(f"URL {p.url}", flush=True)

@@ -92,7 +92,7 @@ def _backend_of(info: dict) -> WbcBackend:
         return WbcBackend.X280_SIM
     if name.startswith("x280"):
         return WbcBackend.X280
-    return WbcBackend.GPU  # cuda-graph:* and the stock PolicyServer's gear_wbc_action
+    return WbcBackend.OTHER  # any other W-WBC server, e.g. the stock PolicyServer's gear_wbc_action
 
 
 class ZmqWbc:
@@ -115,7 +115,7 @@ class ZmqWbc:
     RESET_PING_MS = 200         # reset_episode's retry; the reset window is about 2.5 s
     MAX_FAILURES = 3            # consecutive misses before the episode is latched to ORT
     N_PARITY = 8
-    PARITY_TOL = 1e-4           # a server that reports no parity_tol (GPU: fp32 weights, T-1.1 <= 1.6e-5)
+    PARITY_TOL = 1e-4           # a server that reports no parity_tol (fp32 weights)
     MAX_PARITY_TOL = 1e-2       # the loosest a server may claim: T-3.1's fp16 bound
 
     def __init__(self, url: str, fallback: OrtCpu | None, timeout_ms: int = 5, latch: bool = True,

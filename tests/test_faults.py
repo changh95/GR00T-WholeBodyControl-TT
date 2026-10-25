@@ -261,7 +261,7 @@ def test_wbc_killed_ort_on_the_same_tick_then_latched(faults, capsys):
     before = t0["t_end_ns"] < ev["wbc_kill_ns"]
     after = t0["t_start_ns"] > ev["wbc_dead_ns"]
     assert before.sum() > 100 and after.sum() > 100
-    assert (t0["wbc_be"][before] == WbcBackend.GPU).all() and (t0["wbc_fb"][before] == 0).all()
+    assert (t0["wbc_be"][before] == WbcBackend.OTHER).all() and (t0["wbc_fb"][before] == 0).all()
     assert (t0["wbc_fb"][after] == 1).all() and (t0["wbc_be"][after] == WbcBackend.ORT).all()
     fb = np.nonzero(t0["wbc_fb"])[0]
     k_miss = int(fb[0])
@@ -293,7 +293,7 @@ def test_wbc_reconnects_after_restart(faults, capsys):
         te = t[t["ep"] == e["ep"]]
         assert int(te["t_start_ns"][0]) > ev["wbc_ready_ns"], "episode started before the restart was ready"
         assert e["wbc_reset_ping"] is True and e["n_fallback"] == 0
-        assert (te["wbc_be"] == WbcBackend.GPU).all() and (te["wbc_fb"] == 0).all()
+        assert (te["wbc_be"] == WbcBackend.OTHER).all() and (te["wbc_fb"] == 0).all()
         assert float(np.nanmax(te["shadow_da"])) < 1e-4  # the restarted server serves the same MLPs
     assert int(t["slip"].sum()) == 0
     restart_s = (ev["wbc_ready_ns"] - ev["wbc_dead_ns"]) / 1e9

@@ -10,15 +10,14 @@ pill to STALE / NO DATA; ZMQ reconnects by itself when a loop (re)binds.
 The Blackhole chip panel (§4.3 item 7) comes from a second SUB on the device processes' out-of-band status
 PUBs: x280d on :5573 and server_g1 on :5574, multipart [b"status", msgpack] at 2-10 Hz (INTERFACES.md, "Device
 status streams"). The HUD never sends a request to :5557 or :5558 (a REP serves one request at a time, so a HUD
-poll would delay a control call). Absent publishers are normal (M1 has none); a missing or malformed field shows
+poll would delay a control call). Absent publishers are normal (no --status-pub); a missing or malformed field shows
 as "—", never as a made-up value. The panel replaces the timing histograms and the nav bars when a device
 stream or a Tensix/X280 backend is seen (``--chip auto``), or always/never (``on``/``off``); key c toggles it.
 
 The model (``HudModel``) is plain Python over the decoded messages and is tested without pygame; the view
 (``HudView``) draws one frame onto any pygame Surface, so ``--headless`` (SDL_VIDEODRIVER=dummy) can render
 frames to PNG. The processor map comes from the ``meta`` topic's ``processor`` stamps (backend ``info``);
-a stock server without ``info`` ("policy-server") is placed by its port and marked "(cfg)". A run with nothing on
-the RTX 5090 (no stamp and no swap target there: an X280 run) gets no 5090 box (``HudModel.gpu_in_run``).
+a stock server without ``info`` ("policy-server") is placed by its port and marked "(cfg)".
 
     simpy $RT/scripts/hud.py                                   # live, SUB :5570 (+ :5573, :5574), PUSH :5571
     simpy $RT/scripts/hud.py --headless --frames 60 --png /tmp/hud.png --sub tcp://127.0.0.1:PORT
@@ -57,7 +56,7 @@ STATS_TICKS = 3000  # 60 s window for p99 / histograms
 N_REQ = 50  # §4.3 item 2: VLA latency over the last 50 requests
 LIVE_S = 0.5
 FALL_Z = 0.50  # m, schema.FALL_PELVIS_Z
-WBC_BE = {0: "ORT", 1: "GPU", 2: "X280", 3: "X280-sim"}
+WBC_BE = {0: "ORT", 1: "other", 2: "X280", 3: "X280-sim"}  # rtloop.schema.WbcBackend
 TERMINAL = ("LATE_REJECT", "GEN_DROP", "TIMEOUT", "ERROR", "DRAINED")
 STATUS_SRCS = ("server_g1", "x280d")
 STATUS_STALE_S = 2.0  # the streams run at 2-10 Hz
@@ -66,7 +65,6 @@ RATE_SPAN_S = 1.0  # counter rates (x280d heartbeat, calls, runs) over about thi
 RATE_MIN_S = 0.05  # ... and never over less: snapshots are >= 100 ms apart at 2-10 Hz
 SNAP_STALE_MS = 1000.0  # a snapshot sent this late was not refreshed by x280d's serving thread: no rate from it
 HB_STOP_S = 1.0  # x280d's heartbeat is critical once it has not advanced for this long
-GPU_NAME_RE = re.compile(r"gpu|cuda|5090", re.I)  # a swap target on the RTX 5090 (demo.sh names it "gpu")
 TELEMETRY_KEYS = ("aiclk_mhz", "l2cpuclk_mhz", "asic_temp_c", "vcore_mv", "tdp_w", "tdc_a", "input_power_w",
                   "timer_heartbeat")
 # A simulated publisher's telemetry is invented (kmd.FakeDevice), so it is never shown: x280d --backend sim stamps
@@ -110,7 +108,7 @@ def _port(url) -> int | None:
 
 
 def classify(kind: str, backend, url=None) -> dict:
-    """Where one backend runs, from its ``info`` stamp: {device: host|gpu|tensix|x280|?, label, cfg}.
+    """Where one backend runs, from its ``info`` stamp: {device: host|tensix|x280|?, label, cfg}.
 
     ``cfg`` marks a placement inferred from the configured port (stock server, no ``info``)."""
     name = str(backend or "")
@@ -121,15 +119,13 @@ def classify(kind: str, backend, url=None) -> dict:
     if low == "policy-server":  # stock PolicyServer: no info endpoint, place it by port (D15)
         cfg = True
         port = _port(url)
-        low = {5555: "cuda", 5565: "cuda", 5556: "cuda-graph", 5557: "tt", 5558: "x280"}.get(port, "?")
+        low = {5557: "tt", 5558: "x280"}.get(port, "?")
     if kind == "vla":
         head = low.split(":")[0]
         if low.startswith("mock"):
             dev, label = "host", "VLA mock"
         elif head == "tt" or "tensix" in low or head.startswith("tt-"):
             dev, label = "tensix", "VLA Tensix"
-        elif low.startswith("cuda"):
-            dev, label = "gpu", "VLA 5090" if "5090" in low or cfg else "VLA GPU"
         else:
             dev, label = "?", f"VLA {name}"
     else:
@@ -140,8 +136,6 @@ def classify(kind: str, backend, url=None) -> dict:
         elif low.startswith("x280"):
             m = re.search(r"(\d+)\s*mhz", low)
             dev, label = "x280", f"WBC-MLP X280 @{m.group(1) if m else 800} MHz"
-        elif low.startswith("cuda"):
-            dev, label = "gpu", "WBC 5090" if "5090" in low or cfg else "WBC GPU"
         else:
             dev, label = "?", f"WBC {name}"
     if cfg:
@@ -646,20 +640,6 @@ class HudModel:
         return {"vla": vla, "wbc": wbc, "wbc_now": now_be, "fallback": fallback, "caption": caption,
                 "have_meta": bool(proc)}
 
-    def gpu_in_run(self) -> bool:
-        """Whether this run puts anything on the RTX 5090: the VLA or WBC in use (meta ``processor``) or a swap
-        target (meta ``targets``, the --vla-alt / --wbc-alt names). From the run's configuration, not from a tick, so
-        the processor map keeps one layout for the whole run (a swap only moves between configured targets). False
-        before any meta: an X280 run never shows the GPU, not even while the loop is starting."""
-        if not self.meta.get("processor"):
-            return False
-        p = self.processors()
-        if "gpu" in (p["vla"]["device"], p["wbc"]["device"]):
-            return True
-        targets = self.meta.get("targets") if isinstance(self.meta.get("targets"), dict) else {}
-        names = [n for k in ("vla", "wbc") if isinstance(targets.get(k), (list, tuple)) for n in targets[k]]
-        return any(GPU_NAME_RE.search(str(n)) for n in names)
-
     def active_req(self) -> dict | None:
         t = self.last
         return self.req_by_seq.get(t["seq"]) if t else None
@@ -807,8 +787,7 @@ class HudView:
         self.text(surf, f"HUD {fps:4.1f} fps", (box.left - 12, 16), 13, "muted", mono=True, anchor="topright")
 
     def _processors(self, surf, m, rect, now_ns):
-        """Host CPU, RTX 5090 and Blackhole boxes. A run with nothing on the GPU (m.gpu_in_run(): e.g. demo.sh m3
-        --no-alt) has no 5090 box: the Blackhole box takes its place and gives each engine a line with its live state."""
+        """Host CPU and Blackhole boxes: the Blackhole box gives each engine a line with its live state."""
         pg = self.pg
         x, y, w, h = rect
         self.panel(surf, rect, "PROCESSOR MAP")
@@ -822,10 +801,6 @@ class HudView:
                                                 ("ORT fallback" if fb else "WBC", fb or wbc_dev == "host",
                                                  "serious" if fb else "wbc")]),
         ]
-        gpu = m.gpu_in_run()
-        if gpu:
-            rows += [("RTX 5090", [("VLA", vla_dev == "gpu", "vla"), ("WBC", wbc_dev == "gpu" and not fb, "wbc")]),
-                     ("Blackhole p150a", bh)]
         by = y + 30
         for name, chips in rows:
             box = pg.Rect(x + 12, by, w - 24, 46)
@@ -837,16 +812,15 @@ class HudView:
                 img_w = self.font(12, bold=True).size(label)[0] + 16
                 cx = self._proc_chip(surf, pg.Rect(cx, box.y + 22, img_w, 19), label, lit, role).right + 8
             by += 52
-        if not gpu:  # the 5090's row and the Blackhole row as one box, an engine per line
-            box = pg.Rect(x + 12, by, w - 24, 98)
-            lit_any = any(lit for _, lit, _ in bh)
-            pg.draw.rect(surf, C["axis"] if lit_any else C["grid"], box, width=1, border_radius=5)
-            self.text(surf, "Blackhole p150a", (box.x + 10, box.y + 4), 12, "ink2" if lit_any else "muted")
-            img_w = max(self.font(12, bold=True).size(label)[0] for label, _, _ in bh) + 16
-            for i, ((label, lit, role), note) in enumerate(zip(bh, self._bh_notes(m, p, now_ns))):
-                chip = self._proc_chip(surf, pg.Rect(box.x + 10, box.y + 25 + 34 * i, img_w, 19), label, lit, role)
-                if lit and note:
-                    self.text(surf, note, (chip.right + 10, chip.centery), 12, "ink2", anchor="midleft")
+        box = pg.Rect(x + 12, by, w - 24, 98)  # the Blackhole box, an engine per line
+        lit_any = any(lit for _, lit, _ in bh)
+        pg.draw.rect(surf, C["axis"] if lit_any else C["grid"], box, width=1, border_radius=5)
+        self.text(surf, "Blackhole p150a", (box.x + 10, box.y + 4), 12, "ink2" if lit_any else "muted")
+        img_w = max(self.font(12, bold=True).size(label)[0] for label, _, _ in bh) + 16
+        for i, ((label, lit, role), note) in enumerate(zip(bh, self._bh_notes(m, p, now_ns))):
+            chip = self._proc_chip(surf, pg.Rect(box.x + 10, box.y + 25 + 34 * i, img_w, 19), label, lit, role)
+            if lit and note:
+                self.text(surf, note, (chip.right + 10, chip.centery), 12, "ink2", anchor="midleft")
         cap = p["caption"] if p["have_meta"] else "waiting for meta (processor stamps)"
         col = "ink" if p["have_meta"] else "muted"
         if self.font(15, bold=True).size(cap)[0] <= w - 24:

@@ -38,9 +38,9 @@ def test_splitmix64_reference_and_noise_seed():
 
 def test_vla_backend_of():
     assert loop.vla_backend_of({"backend": "mock:detfn"}) == VlaBackend.MOCK
-    assert loop.vla_backend_of({"backend": "cuda:rtx5090:x@1"}) == VlaBackend.GPU
     assert loop.vla_backend_of({"backend": "tt:p150a:MK@abc"}) == VlaBackend.TT
-    assert loop.vla_backend_of({}) == VlaBackend.GPU  # stock PolicyServer: no info endpoint
+    assert loop.vla_backend_of({"backend": "unknown:x@1"}) == VlaBackend.OTHER
+    assert loop.vla_backend_of({}) == VlaBackend.OTHER  # stock PolicyServer: no info endpoint
 
 
 @pytest.mark.parametrize("mode", clock.PACING)

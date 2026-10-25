@@ -234,7 +234,7 @@ def test_zmq_normal_reply(fake, ort1):
     srv = fake()
     z = wb.ZmqWbc(srv.url, ort1)
     try:
-        assert z.proto == 2 and z.backend == WbcBackend.GPU and z.parity_max_err == 0.0
+        assert z.proto == 2 and z.backend == WbcBackend.OTHER and z.parity_max_err == 0.0
         assert z.info()["backend"] == "fake" and z.info()["proto_used"] == 2
         rng = np.random.default_rng(4)
         for k in range(20):
@@ -242,7 +242,7 @@ def test_zmq_normal_reply(fake, ort1):
             x = unit_obs(rng, 1)[0]
             a, meta = z(policy, x, tick=k, seq=100 + k)
             assert np.array_equal(a, ort1(policy, x))
-            assert not meta["fallback"] and meta["backend"] == WbcBackend.GPU and meta["error"] is None
+            assert not meta["fallback"] and meta["backend"] == WbcBackend.OTHER and meta["error"] is None
             assert meta["dev_us"] == 12.5 and 0 < meta["rtt_us"] < 50_000
             last = srv.requests[-1]
             assert last[1] == ("obs", "policy", "seq", "tick")
@@ -399,7 +399,7 @@ def test_zmq_proto1_server_gets_only_policy_and_obs(fake, ort1):
     srv = fake(proto=1)
     z = wb.ZmqWbc(srv.url, ort1)
     try:
-        assert z.proto == 1 and z.backend == WbcBackend.GPU
+        assert z.proto == 1 and z.backend == WbcBackend.OTHER
         x = unit_obs(np.random.default_rng(11), 1)[0]
         for k in range(5):
             a, meta = z(WBC_BALANCE, x, tick=k, seq=k)
@@ -441,7 +441,7 @@ def test_runtime_with_zmq_primary_and_shadow(fake, ort1):
             seqs.append(srv.requests[-1][2]["seq"])
             c = rt.last
             assert c.tick == 40 + k and c.policy == WBC_WALK and c.obs is x
-            assert c.backend == WbcBackend.GPU and not c.fallback and c.shadow_da == 0.0
+            assert c.backend == WbcBackend.OTHER and not c.fallback and c.shadow_da == 0.0
             assert c.dev_us == 12.5 and c.rtt_us > 0 and np.array_equal(c.action, a)
         assert np.all(np.diff(seqs) == 1)
         assert [d[0] for d in dump] == [40, 41, 42, 43] and rt.n_calls[WBC_WALK] == 4
@@ -884,7 +884,7 @@ def test_wbc_gpu_server_endpoints(wbc_server):
 def test_wbc_gpu_server_parity_and_rtt(wbc_server, ort1, capsys):
     z = wb.ZmqWbc(wbc_server.url, ort1, timeout_ms=1000)
     try:
-        assert z.proto == 2 and z.backend == WbcBackend.GPU
+        assert z.proto == 2 and z.backend == WbcBackend.OTHER
         rng = np.random.default_rng(13)
         for policy in WBC_POLICIES:
             worst = 0.0

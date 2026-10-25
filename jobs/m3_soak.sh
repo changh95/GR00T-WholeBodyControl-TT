@@ -6,11 +6,10 @@
 #   CHIP_X280D_SERVE_ARGS="serve --port 5558 --tile 3 --stage0 --cpus 5 --status-pub $X280_STATUS" \
 #       $DEVX $RT/scripts/chip_session.sh --x280 boot:3 --vla tt --job $RT/jobs/m3_soak.sh --tag t39
 #
-# PLAN.md T-3.9 is `demo.sh m3 --duration 7200 --swap-wbc-every 10`; as a session job (the shape of jobs/t2_soak.sh
-# for T-2.6 / T-2.8) that is scripts/demo.sh m3 --in-session --hud --record on the session's server_g1 and x280d
-# (booted with --stage0, the standard E1F boot since 2026-10-25, or --boot), with the GPU WBC :5556 as the second
-# swap target (demo.sh starts it unless it answers). --swap-wbc-every 10 cycles the loop's WBC x280 -> ort -> gpu ->
-# x280 every 10 s of ticks (rtloop.control NEXT; stateless, D2). Then PLAN T-3.9's rows:
+# PLAN.md T-3.9 is `demo.sh m3 --duration 7200 --swap-wbc-every 10`; as a session job that is scripts/demo.sh m3
+# --in-session --hud --record on the session's server_g1 and x280d (booted with --stage0, the standard E1F boot since
+# 2026-10-25, or --boot). --swap-wbc-every 10 cycles the loop's WBC x280 -> ort -> x280 every 10 s of ticks
+# (rtloop.control NEXT; stateless, D2). Then PLAN T-3.9's rows:
 #   analyze_run.py --gates t39 (the session set of x280/tools/m3_jobs.py t39-gates): tick period p99 <= 21 ms,
 #     0 slips, 0 unplanned fallbacks (wbc_fb: a W-WBC call that failed and was served by ORT; a swap is planned);
 #   m3_jobs.py t39-summary: 0 traps (every tile's n_traps unchanged in x280d's status before, during and after) and
@@ -37,14 +36,14 @@ need_vla
 need_rt_cores "rt_sim (CPUs 2/3) and the HUD (CPUs 6-7)"
 M3J=$RT/x280/tools/m3_jobs.py
 dur=${M3_SOAK_DURATION:-7200}
-# The user (2026-10-25): the GPU WBC has no place in M3, so T-3.9 is an X280-only soak by default (no swaps; the
-# HUD's fault/fallback demo uses the host-CPU ORT only). M3_SOAK_SWAP_S=N restores the PLAN's x280 -> ort -> gpu cycle.
+# The user (2026-10-25): T-3.9 is an X280-only soak by default (no swaps; the HUD's fault/fallback demo uses the
+# host-CPU ORT only). M3_SOAK_SWAP_S=N swaps x280 -> ort -> x280 every N s.
 swap=${M3_SOAK_SWAP_S:-0}
 tag=${M3_SOAK_TAG:-t39}
 runs=$CHIP_SESSION_DIR/runs_$tag
 gates=$CHIP_SESSION_DIR/gates_$tag.yaml
 # shellcheck disable=SC2206  # option lists, split on whitespace
-demo_opts=(${M3_SOAK_DEMO_ARGS---hud --record --no-alt})
+demo_opts=(${M3_SOAK_DEMO_ARGS---hud --record})
 # shellcheck disable=SC2206
 loop_extra=(${M3_SOAK_LOOP_ARGS:-})
 case " ${demo_opts[*]} " in

@@ -9,7 +9,7 @@ meanwhile sending one W-WBC gear_wbc_action to a tcp:// --wbc every 50 ms (so x2
 reply re-creates the REQ socket, as rt_sim's client does).
 The run: 20 ms ticks at 50 Hz, episodes of 1440 ticks, the WBC on the X280 sim (wbc_be X280_SIM, 0.7 ms) shadowed
 by ORT with shadow_da M3_STUB_SHADOW_DA (default 7e-3, the fp16 kernel's size) and, with --swap-wbc-every S, on ORT
-for every other S seconds of ticks (a swap per S seconds: X280_SIM -> ORT -> X280_SIM, as demo.sh --no-alt
+for every other S seconds of ticks (a swap per S seconds: X280_SIM -> ORT -> X280_SIM, as demo.sh m3
 cycles). M3_STUB_RUN_S sets the run's length (default --duration), M3_STUB_FALLBACKS N marks N ticks wbc_fb.
 """
 

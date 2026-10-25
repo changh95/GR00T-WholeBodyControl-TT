@@ -66,19 +66,19 @@ class FakeVla:
 def lp(loopmod, zmq_ctx):
     L = loopmod.Loop.__new__(loopmod.Loop)
     ort = SimpleNamespace(name="ort")
-    gpu = FakeZmqWbc("tcp://127.0.0.1:1")
+    remote = FakeZmqWbc("tcp://127.0.0.1:1")
     L.args = argparse.Namespace(swap_wbc_every=None, no_shadow=False)
     L.wb = SimpleNamespace(ZmqWbc=FakeZmqWbc)
     L.ort = ort
     L.remote_shadow = None
     L.swap_every_s = None
     L.pauses = []
-    L.runtime = SimpleNamespace(primary=gpu, shadow=ort)
-    L.wbc_targets, L.wbc_name = {"gpu": gpu, "ort": ort}, "gpu"
+    L.runtime = SimpleNamespace(primary=remote, shadow=ort)
+    L.wbc_targets, L.wbc_name = {"remote": remote, "ort": ort}, "remote"
     L.vla = FakeVla("tcp://127.0.0.1:2")
-    L.vla_info = {"backend": "cuda:rtx5090:x@1"}
-    L.vla_clients = {"gpu": (L.vla, L.vla_info), "tt": (FakeVla("tcp://127.0.0.1:3"), {"backend": "tt:p150a:x"})}
-    L.vla_name = "gpu"
+    L.vla_info = {"backend": "mock:x"}
+    L.vla_clients = {"mock": (L.vla, L.vla_info), "tt": (FakeVla("tcp://127.0.0.1:3"), {"backend": "tt:p150a:x"})}
+    L.vla_name = "mock"
     L.control = pull = control_proto.ControlPull("tcp://127.0.0.1:*", ctx=zmq_ctx)
     L.cstate = control_proto.ControlState()
     L.control_log = []
@@ -116,11 +116,11 @@ def test_wbc_swap_applies_from_the_next_tick(lp):
     push.send("swap_wbc", "next")
     assert boundary(L, 10) is False
     assert L.runtime.primary is L.ort and L.runtime.shadow is None and L.wbc_name == "ort"
-    gpu = L.wbc_targets["gpu"]
-    push.send("swap_wbc", "gpu")
+    remote = L.wbc_targets["remote"]
+    push.send("swap_wbc", "remote")
     boundary(L, 11)
-    assert L.runtime.primary is gpu and L.runtime.shadow is L.ort  # ORT shadows a remote backend (D16)
-    assert gpu.latched is False and gpu.consecutive == 0  # a latched episode never sticks to a swap
+    assert L.runtime.primary is remote and L.runtime.shadow is L.ort  # ORT shadows a remote backend (D16)
+    assert remote.latched is False and remote.consecutive == 0  # a latched episode never sticks to a swap
     assert L.n_wbc_swaps == 2 and L.ep_wbc_swaps == 2
     assert [e["action"] for e in L.control_log[-2:]] == ["swap_wbc", "swap_wbc"]
 
@@ -131,13 +131,13 @@ def test_vla_swap_waits_for_the_reset_window(lp):
     L.st.d_hist[:] = [4, 4, 5]
     push.send("swap_vla", "next")
     boundary(L, 5)
-    assert L.cstate.pending_vla == "tt" and L.vla_name == "gpu"  # nothing changes mid-episode
+    assert L.cstate.pending_vla == "tt" and L.vla_name == "mock"  # nothing changes mid-episode
     L._swap_vla(L.cstate.pending_vla)  # what episode() does before the gen bump
     assert L.vla_name == "tt" and L.vla.url == "tcp://127.0.0.1:3" and L.vla_info["backend"].startswith("tt")
     assert L.cstate.pending_vla is None and L.st.d_hist == [] and L.n_vla_swaps == 1
     L.vla.in_flight = True
     with pytest.raises(AssertionError):
-        L._swap_vla("gpu")
+        L._swap_vla("mock")
 
 
 def test_reset_ends_the_episode(lp):
@@ -182,14 +182,14 @@ def test_rejected_and_auto_swap(lp):
     boundary(L, 0)
     push.send("swap_wbc", "x280")  # not registered
     boundary(L, 1)
-    assert L.cstate.n_rejected == 1 and L.wbc_name == "gpu"
+    assert L.cstate.n_rejected == 1 and L.wbc_name == "remote"
     L.swap_every_s = 0.1  # every 5 ticks (--swap-wbc-every 0.1)
     L.n_ticks_total = 0
     names = []
     for k in range(20):
         L._control_boundary(k)
         names.append(L.wbc_name)
-    assert names[4] == "ort" and names[9] == "gpu" and names[14] == "ort" and names.count("ort") == 10
+    assert names[4] == "ort" and names[9] == "remote" and names[14] == "ort" and names.count("ort") == 10
 
 
 def test_boundary_is_cheap_when_idle(lp):
@@ -215,9 +215,9 @@ def test_ort_primary_gets_the_remote_shadow_back(lp):
     push.send("swap_wbc", "ort")
     boundary(L, 3)
     assert L.runtime.primary is L.ort and L.runtime.shadow is L.remote_shadow
-    push.send("swap_wbc", "gpu")
+    push.send("swap_wbc", "remote")
     boundary(L, 4)
-    assert L.runtime.primary is L.wbc_targets["gpu"] and L.runtime.shadow is L.ort
+    assert L.runtime.primary is L.wbc_targets["remote"] and L.runtime.shadow is L.ort
 
 
 def test_pauses_are_recorded_in_full(lp):
@@ -230,10 +230,10 @@ def test_pauses_are_recorded_in_full(lp):
 
 
 def test_cli_flags(loopmod):
-    a = loopmod.build_parser().parse_args(["--control", "--vla-alt", "gpu=tcp://127.0.0.1:5565",
-                                           "--wbc-alt", "gpu=tcp://127.0.0.1:5556", "--swap-wbc-every", "10"])
+    a = loopmod.build_parser().parse_args(["--control", "--vla-alt", "mock=tcp://127.0.0.1:5559",
+                                           "--wbc-alt", "x280=tcp://127.0.0.1:5558", "--swap-wbc-every", "10"])
     assert a.control == "tcp://127.0.0.1:5571" and a.swap_wbc_every == 10.0
-    assert control_proto.parse_targets(a.vla_alt) == {"gpu": "tcp://127.0.0.1:5565"}
+    assert control_proto.parse_targets(a.vla_alt) == {"mock": "tcp://127.0.0.1:5559"}
     b = loopmod.build_parser().parse_args([])
     assert b.control is None and b.vla_alt == "" and b.wbc_alt == "" and b.swap_wbc_every is None
     assert b.shadow is None and b.shadow_timeout_ms is None
@@ -259,7 +259,7 @@ def test_real_module_is_tested(loopmod):
 
 
 class OrtWbcServer:
-    """A W-WBC REP server in a thread that answers with in-process ORT (a stand-in for :5556/:5558)."""
+    """A W-WBC REP server in a thread that answers with in-process ORT (a stand-in for x280d's :5558)."""
 
     def __init__(self, offset: float = 0.0):
         import zmq
@@ -286,7 +286,7 @@ class OrtWbcServer:
             req = self.wire.loads(self.sock.recv())
             ep, data = req.get("endpoint"), req.get("data") or {}
             if ep == "info":
-                out = {"backend": "cuda-graph:fake", "proto": 2, "policies": list(self.ort.policies),
+                out = {"backend": "fake", "proto": 2, "policies": list(self.ort.policies),
                        "parity_tol": 1e-2}
             elif ep == "ping":
                 out = {"status": "ok"}
@@ -335,10 +335,10 @@ def test_real_loop_applies_operator_control(tmp_path, zmq_ctx):
     from rtloop.schema import WbcBackend
 
     mock, url = lu.start_mock("detfn")
-    gpu = OrtWbcServer()
+    remote = OrtWbcServer()
     pub, ctl = f"tcp://127.0.0.1:{_free_port()}", f"tcp://127.0.0.1:{_free_port()}"
     run = lu.LoopRun(tmp_path, "ctl", "--mode", "vl", "--d-inj", "4", "--vla", url, "--wbc", "ort",
-                     "--wbc-alt", f"gpu={gpu.url}", "--control", ctl, "--pub", pub, "--seeds", "0-1",
+                     "--wbc-alt", f"remote={remote.url}", "--control", ctl, "--pub", pub, "--seeds", "0-1",
                      "--max-ticks", "300")
     sub = zmq_ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.SUBSCRIBE, b"tick")
@@ -354,8 +354,8 @@ def test_real_loop_applies_operator_control(tmp_path, zmq_ctx):
 
     try:
         until(lambda m: m["ep"] == 0 and m["k"] >= 10)
-        assert push.send("swap_wbc", "gpu")
-        until(lambda m: m["wbc_be"] == WbcBackend.GPU)
+        assert push.send("swap_wbc", "remote")
+        until(lambda m: m["wbc_be"] == WbcBackend.OTHER)
         assert push.send("pause", "on")
         time.sleep(0.4)
         assert push.send("pause", "off")
@@ -367,7 +367,7 @@ def test_real_loop_applies_operator_control(tmp_path, zmq_ctx):
         run.kill()
         push.close()
         sub.close(linger=0)
-        gpu.stop()
+        remote.stop()
         lu.stop(mock)
     summary = json.loads((d / "summary.json").read_text())
     c = summary["control"]
@@ -375,13 +375,13 @@ def test_real_loop_applies_operator_control(tmp_path, zmq_ctx):
     assert len(c["pauses_at"]) == 1 and c["pauses_at"][0][0] == 0 and c["pauses_at"][0][2] >= 300
     eps = [json.loads(ln) for ln in (d / "episodes.jsonl").read_text().splitlines()]
     assert [(e["ep"], e["seed"], e["end"]) for e in eps] == [(1, 1, "TRUNC")]  # ep 0 was the operator reset
-    assert eps[0]["wbc_target"] == "gpu" and eps[0]["wbc"] == gpu.url and gpu.n > 0
+    assert eps[0]["wbc_target"] == "remote" and eps[0]["wbc"] == remote.url and remote.n > 0
     ticks = np.load(d / "ticks.npy")
     t0 = ticks[ticks["ep"] == 0]
     assert t0["k"].max() < 299 and t0["k"].max() >= k  # ended early, at the reset
     nan = np.isnan(t0["period_us"]) & (t0["k"] > 0)
     assert nan.sum() == 1 and int(t0["k"][nan][0]) == k  # the first tick after the pause carries no period
-    assert (t0["wbc_be"][t0["k"] > int(t0["k"][nan][0])] == WbcBackend.GPU).all()
+    assert (t0["wbc_be"][t0["k"] > int(t0["k"][nan][0])] == WbcBackend.OTHER).all()
     ar = subprocess.run([sys.executable, str(RT / "scripts" / "analyze_run.py"), str(d), "--gates", "m1_sim_smoke",
                          "--no-plots"], capture_output=True, text=True)
     assert ar.returncode == 0, ar.stdout + ar.stderr

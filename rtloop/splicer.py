@@ -35,7 +35,7 @@ class SplicerConfig:
     late_reject_rows: int = 4  # reject a chunk if usable rows H - d <= this (d >= 26)
     starve_ramp: int = 5  # ticks to ramp nav to 0 when starved (or paused, C2)
     starve_fault: int = 50  # consecutive starved ticks -> STARVE_FAULT flag (episode continues)
-    d_init: int = 4  # d_hat before any measurement (4 on the 5090, 3 on TT; VL: pass d_inj)
+    d_init: int = 4  # d_hat before any measurement (3 on TT; VL: pass d_inj)
     sync_rows: int = 20  # rows a synchronous arm executes per chunk (C2/C2b/C6)
 
     def __post_init__(self):

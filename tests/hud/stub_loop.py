@@ -34,7 +34,7 @@ def main() -> int:
     ap.add_argument("--swap-wbc-every", type=float, default=None)
     ap.add_argument("--duration", type=float, default=5.0)
     ap.add_argument("--tag", default="stub")
-    ap.add_argument("--profile", default="m1")
+    ap.add_argument("--profile", default="sim")
     args, _unknown = ap.parse_known_args()
 
     stop = {"flag": False}

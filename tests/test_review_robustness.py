@@ -258,9 +258,9 @@ def test_shadow_gate_is_na_for_ort_wbc_and_fails_without_shadow_on_remote(tmp_pa
     assert v["pass"], v["table"]  # n/a does not fail the verdict
     assert "shadow_da_p99_max" in v["table"] and "n/a" in v["table"]
 
-    ticks, reqs, eps = synth()  # GPU WBC on every tick, but no shadow value logged (--no-shadow)
+    ticks, reqs, eps = synth()  # a remote WBC on every tick, but no shadow value logged (--no-shadow)
     ticks["shadow_da"] = np.nan
-    remote = write_run(tmp_path / "gpu", ticks, reqs, eps,
+    remote = write_run(tmp_path / "remote", ticks, reqs, eps,
                        config={"synthetic": True, "args": {"viewer": True, "wbc": "tcp://127.0.0.1:1"}})
     v = ar.analyze(remote, "m1_rt", plots=False)
     c = next(c for c in v["checks"] if c["name"] == "shadow_da_p99_max")

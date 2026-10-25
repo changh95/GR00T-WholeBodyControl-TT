@@ -9,11 +9,11 @@ dispatch on the returned action. Semantics (PLAN.md §1.4.5, §0.2 demo ladder, 
 
 - ``swap_wbc``: the WBC call is stateless (D2), so the swap takes effect from the next tick.
 - ``swap_vla``: queued and applied in the next reset window, where ``gen`` is bumped anyway, so a chunk from
-  the old server can never be spliced (M2: "GPU<->TT swap between episodes"). ``reset`` applies it at once.
+  the old server can never be spliced. ``reset`` applies it at once.
 - ``reset``: ends the current episode at the boundary (no EpisodeLog outcome) and starts the next seed.
 - ``pause``: freezes the sim between ticks (``to`` = on | off | None = toggle); the pacer re-anchors on resume.
 
-``to`` is a target name registered by the loop (e.g. gpu, tt, ort, x280) or ``next`` (cycle in registration
+``to`` is a target name registered by the loop (e.g. tt, mock, ort, x280) or ``next`` (cycle in registration
 order). Unknown keys, wrong types, oversized messages and commands older than ``MAX_AGE_NS`` are rejected,
 so a stale key press queued while no loop was listening is never applied to a later run.
 
@@ -138,7 +138,7 @@ def parse(raw, now_ns: int | None = None, max_age_ns: int = MAX_AGE_NS) -> Comma
 
 
 def parse_targets(spec: str | None) -> dict[str, str]:
-    """'gpu=tcp://127.0.0.1:5556,x280=tcp://127.0.0.1:5558' -> {name: url}, in order (the CLI form)."""
+    """'tt=tcp://127.0.0.1:5557,mock=tcp://127.0.0.1:5559' -> {name: url}, in order (the CLI form)."""
     out: dict[str, str] = {}
     for part in (spec or "").split(","):
         part = part.strip()

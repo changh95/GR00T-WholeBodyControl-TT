@@ -117,7 +117,7 @@ def vla_backend_of(info: dict) -> VlaBackend:
         return VlaBackend.MOCK
     if "tt" in name.split(":")[0] or "tensix" in name:
         return VlaBackend.TT
-    return VlaBackend.GPU  # the RT-owned and the stock GPU servers
+    return VlaBackend.OTHER  # a server that names no known backend (a stock PolicyServer has no info endpoint)
 
 
 def rss_mb() -> float:
@@ -236,7 +236,7 @@ class Loop:
         self.runtime = wb.WbcRuntime(primary, shadow, dump=[] if args.dump_obs516 else None)
         wb.install(self.runtime)  # before the env builds its G1GearWbcPolicy (D5)
         # WBC swap targets (HUD key w, PLAN.md §1.4.5, WP-3.9): connected and parity-checked here, never
-        # on the tick path. "ort" is always one; the primary is named by its backend (gpu, x280, ...).
+        # on the tick path. "ort" is always one; the primary is named by its backend (x280, x280_sim, ...).
         self.wbc_name = "ort" if args.wbc == "ort" else primary.backend.name.lower()
         self.wbc_targets = {self.wbc_name: primary, "ort": self.ort}
         for name, url in control.parse_targets(args.wbc_alt).items():
@@ -998,7 +998,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--s", type=int, default=16, help="trigger period, ticks")
     ap.add_argument("--B", type=int, default=0, help="crossfade ticks on a switch")
     ap.add_argument("--d-inj", type=int, default=4, help="VL: ticks from k_obs until a chunk is visible")
-    ap.add_argument("--d-init", type=int, default=4, help="RT: d_hat before any measurement (5090: 4, TT: 3)")
+    ap.add_argument("--d-init", type=int, default=4, help="RT: d_hat before any measurement (TT: 3)")
     ap.add_argument("--sync-rows", type=int, default=20, help="rows per chunk of the synchronous arms / sync mode")
     ap.add_argument("--vla", default=os.environ.get("VLA_MOCK", "tcp://127.0.0.1:5559"))
     ap.add_argument("--wbc", default="ort", help="'ort' (in process) or a W-WBC URL")

@@ -623,7 +623,7 @@ def swap_da(ticks) -> dict:
     """|da| at every WBC swap of a run (TickLog ticks.npy; numpy, so run t39-summary with simpy). A swap is a change
     of wbc_be between consecutive ticks of one episode, both served without a fallback. Every remote backend is
     shadowed by ORT (D16: shadow_da = |a_remote - a_ort| on that tick), so a swap to or from ORT is the shadow_da of
-    its remote side, and a remote <-> remote swap (x280 <-> gpu) is bounded by the sum of both sides' (through ORT).
+    its remote side, and a remote <-> remote swap is bounded by the sum of both sides' (through ORT).
     A swap whose needed shadow_da is missing (NaN) counts as no data, which fails."""
     import numpy as np
 
@@ -642,7 +642,7 @@ def swap_da(ticks) -> dict:
             no_data += 1
     mx = max(das) if das else None
     return {"swaps": int(idx.size), "no_data": no_data, "max_da": mx, "tol": T39_SWAP_DA_MAX, "pairs": pairs,
-            "wbc_be": "rtloop.schema.WbcBackend (0 ORT, 1 GPU, 2 X280, 3 X280_SIM)",
+            "wbc_be": "rtloop.schema.WbcBackend (0 ORT, 1 OTHER, 2 X280, 3 X280_SIM)",
             "pass": bool(idx.size and not no_data and mx is not None and mx <= T39_SWAP_DA_MAX)}
 
 

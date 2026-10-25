@@ -35,7 +35,7 @@ from synth_status import CORE_MAP_COUNTS, StatusPublisher, server_g1_msg, x280d_
 AUX_CPUS = os.environ.get("RTLOOP_TEST_AUX_CPUS", "24,25")
 
 
-def feed(model, profile="m1", eps=1, stop=None, roundtrip=True):
+def feed(model, profile="sim", eps=1, stop=None, roundtrip=True):
     """Fold SynthStream into a HudModel through the wire codec; stop=(ep, k) ends after that tick."""
     st = SynthStream(ticks_per_ep=500, profile=profile)
     for ep in range(eps):
@@ -52,18 +52,14 @@ def feed(model, profile="m1", eps=1, stop=None, roundtrip=True):
 
 
 @pytest.mark.parametrize("kind,backend,url,device,label", [
-    ("vla", "cuda:rtx5090:cloudwalk-research/GR00T-N1.6-G1-PnPAppleToPlate@2a5b61cc", None, "gpu", "VLA 5090"),
     ("vla", "tt:p150a:cloudwalk@2a5b61cc", None, "tensix", "VLA Tensix"),
     ("vla", "tensix-n16-g1", None, "tensix", "VLA Tensix"),
     ("vla", "mock:detfn", None, "host", "VLA mock"),
-    ("vla", "policy-server", "tcp://127.0.0.1:5555", "gpu", "VLA 5090 (cfg)"),
     ("vla", "policy-server", "tcp://127.0.0.1:5557", "tensix", "VLA Tensix (cfg)"),
-    ("wbc", "cuda-graph:rtx5090", None, "gpu", "WBC 5090"),
     ("wbc", "ort-cpu", None, "host", "WBC ORT CPU"),
     ("wbc", "x280:l2cpu3:h0@800MHz", None, "x280", "WBC-MLP X280 @800 MHz"),
     ("wbc", "x280", None, "x280", "WBC-MLP X280 @800 MHz"),
     ("wbc", "x280-sim", None, "host", "WBC-MLP X280-sim"),
-    ("wbc", "policy-server", "tcp://127.0.0.1:5555", "gpu", "WBC 5090 (cfg)"),
     ("wbc", None, None, "?", "WBC ?"),
 ])
 def test_classify(kind, backend, url, device, label):
@@ -73,8 +69,7 @@ def test_classify(kind, backend, url, device, label):
 
 
 @pytest.mark.parametrize("profile,caption", [
-    ("m1", "VLA 5090 / WBC 5090"),
-    ("m2", "VLA Tensix / WBC 5090"),
+    ("sim", "VLA mock / WBC-MLP X280-sim"),
     ("m3", "VLA Tensix / WBC-MLP X280 @800 MHz, 410 µs (mcycle)"),
 ])
 def test_processor_map_follows_meta(profile, caption):
@@ -84,7 +79,7 @@ def test_processor_map_follows_meta(profile, caption):
 
 
 def test_model_counts_and_episode_bookkeeping():
-    m = feed(hud.HudModel(), "m1", eps=2)
+    m = feed(hud.HudModel(), "sim", eps=2)
     s = m.summary()
     assert s["rx"]["tick"] == 1000 and s["bad"] == 0 and s["dropped_ticks"] == 0
     assert s["episodes"] == 1 and s["successes"] == 1  # ep 0 succeeds on its last tick; ep 1 still open
@@ -129,7 +124,7 @@ def test_status_transitions():
     assert m.status(1_100_000_000)[0] == "LIVE"
     st, age = m.status(3_000_000_000)
     assert st == "STALE" and abs(age - 2.0) < 1e-9
-    m.ingest(b"meta", {"paused": True, "processor": META["m1"]}, t_ns=3_000_000_000)
+    m.ingest(b"meta", {"paused": True, "processor": META["sim"]}, t_ns=3_000_000_000)
     assert m.status(3_100_000_000)[0] == "PAUSED"
 
 
@@ -170,7 +165,7 @@ def pixel(surf, xy):
 def test_render_states_to_png(pg, tmp_path):
     shots = {
         "nodata": hud.HudModel(),
-        "m1": feed(hud.HudModel(), "m1", stop=(0, 120)),
+        "sim": feed(hud.HudModel(), "sim", stop=(0, 120)),
         "m3_starved": feed(hud.HudModel(), "m3", eps=2, stop=(1, 305)),
     }
     out = {}
@@ -181,15 +176,17 @@ def test_render_states_to_png(pg, tmp_path):
         out[name] = surf
     # status pill (top right) and the lit Blackhole chips differ by state
     assert pixel(out["nodata"], (1258, 22)) == hud.C["crit"]
-    assert pixel(out["m1"], (1258, 22)) == hud.C["good"]
-    # M1 (GPU VLA and WBC): Host, RTX 5090 and Blackhole rows; the Blackhole row's Tensix chip is unlit
-    gpu_vla_chip, bh_row_chip = (44, 168), (41, 217)
-    assert pixel(out["m1"], gpu_vla_chip) == hud.C["vla"] and pixel(out["m1"], bh_row_chip) != hud.C["vla"]
-    # M3 (Tensix + X280, nothing on the GPU): no 5090 row, the Blackhole box moves up into its place
-    assert pixel(out["m3_starved"], gpu_vla_chip) == hud.C["vla"]  # the Tensix chip now
-    assert pixel(out["m3_starved"], (44, 202)) == hud.C["wbc"]  # X280: WBC-MLP on the box's second line
+    assert pixel(out["sim"], (1258, 22)) == hud.C["good"]
+    # the Host CPU box, then the Blackhole box with an engine per line (Tensix: VLA, X280: WBC-MLP)
+    host_vla_chip, tensix_chip, x280_chip = (152, 106), (44, 168), (44, 202)
+    # mock VLA and x280d sim: both on the host, the Blackhole chips unlit
+    assert pixel(out["sim"], host_vla_chip) == hud.C["vla"] and pixel(out["sim"], tensix_chip) != hud.C["vla"]
+    # M3 (Tensix + X280): the Blackhole chips lit, the host's VLA chip not
+    m3 = out["m3_starved"]
+    assert pixel(m3, tensix_chip) == hud.C["vla"] and pixel(m3, x280_chip) == hud.C["wbc"]
+    assert pixel(m3, host_vla_chip) != hud.C["vla"]
     # ego thumbnail is drawn (gradient, not the panel colour) only once a thumbnail arrived
-    assert pixel(out["m1"], (1200, 300)) != hud.C["panel"]
+    assert pixel(out["sim"], (1200, 300)) != hud.C["panel"]
     assert pixel(out["nodata"], (1200, 300)) == hud.C["panel"]
 
 
@@ -516,16 +513,18 @@ def test_chip_panel_survives_every_field_malformed(pg):
 
 
 def test_chip_panel_auto_mode_and_the_c_key(pg):
-    m1 = feed(hud.HudModel(), "m1", stop=(0, 120))
+    sim = feed(hud.HudModel(), "sim", stop=(0, 120))
     view = hud.HudView(pg)
-    assert not view.chip_shown(m1)  # M1: no device stream, no Tensix/X280 backend
-    assert view.chip_shown(feed(hud.HudModel(), "m2", stop=(0, 120)))  # VLA on Tensix
-    view.toggle_chip(m1)
-    assert view.chip == "on" and view.chip_shown(m1)
-    view.toggle_chip(m1)
-    assert view.chip == "off" and not view.chip_shown(m1)
+    assert not view.chip_shown(sim)  # mock VLA + x280d sim: no device stream, no Tensix/X280 backend
+    tt = feed(hud.HudModel(), "sim", stop=(0, 120))
+    tt.ingest(b"meta", {**tt.meta, "processor": {**META["m3"], "wbc": "ort-cpu"}})
+    assert view.chip_shown(tt)  # VLA on Tensix (with the ORT WBC)
+    view.toggle_chip(sim)
+    assert view.chip == "on" and view.chip_shown(sim)
+    view.toggle_chip(sim)
+    assert view.chip == "off" and not view.chip_shown(sim)
     m3, _ = chip_model()
-    assert not hud.HudView(pg, chip="off").chip_shown(m3) and hud.HudView(pg, chip="on").chip_shown(m1)
+    assert not hud.HudView(pg, chip="off").chip_shown(m3) and hud.HudView(pg, chip="on").chip_shown(sim)
 
 
 def test_chip_frame_cost_fits_30_fps(pg, tmp_path):
@@ -627,7 +626,7 @@ def test_chip_panel_variant_and_dtype_from_x280d(pg):
     assert "v2-fp16-fp16" not in "\n".join(draw(pg, m, now)[1].in_chip_panel())
 
 
-# --- X280 runs: no RTX 5090 on the map, live X280 values (user request 2026-10-25) ------------------------------
+# --- X280 runs: live X280 values (user request 2026-10-25) ------------------------------------------------------
 
 
 def x280_stream(m, now, n=8, hz=5.0, hb_hz=50e6, calls_hz=50.0, hb_frozen_from=None, rx_lag_s=0.0, **over):
@@ -721,50 +720,9 @@ def test_x280_column_when_not_healthy(pg, case, hart, hb, tile_note):
     assert f"L2CPU3 (8,7) {tile_note}" in "\n".join(view.in_chip_panel())
 
 
-@pytest.mark.parametrize("profile,targets,gpu", [
-    ("m1", None, True), ("m2", None, True),
-    ("m3", None, False),  # demo.sh m3 --no-alt: Tensix VLA, X280 WBC, ORT the only alternative
-    ("m3", {"vla": ["tt"], "wbc": ["x280", "ort", "gpu"]}, True),  # demo.sh m3 with the GPU WBC as key-w target
-    ("m3", {"vla": ["tt", "cuda5090"], "wbc": ["x280", "ort"]}, True),
-])
-def test_processor_map_shows_the_gpu_only_when_the_run_uses_it(pg, profile, targets, gpu):
-    m = feed(hud.HudModel(), profile, stop=(0, 120))
-    if targets is not None:
-        m.ingest(b"meta", {**m.meta, "targets": targets})
-    assert m.gpu_in_run() is gpu
-    surf, view = draw(pg, m, time.monotonic_ns())
-    s = "\n".join(view.drawn)
-    assert ("RTX 5090" in s) is gpu
-    if not gpu:  # no GPU wording anywhere in the frame; the Blackhole box has an engine per line
-        assert not [t for t in view.drawn if "5090" in t or "gpu" in t.lower()], s
-        assert pixel(surf, (44, 168)) == hud.C["vla"] and pixel(surf, (44, 202)) == hud.C["wbc"]
-
-
-def test_processor_map_layout_follows_the_run_not_the_tick(pg):
-    """The decision comes from the run's meta (processor stamps and swap targets), so a fallback tick (ORT) or a WBC
-    swap between configured targets never moves the boxes; before any meta the GPU is not shown."""
-    assert hud.HudModel().gpu_in_run() is False
-    m = hud.HudModel()
-    seen = set()
-    for topic, f in SynthStream(ticks_per_ep=300, profile="m3").episode(0):
-        if topic == "ego":
-            f = {"seq": f[0], "k_obs": f[1], "img": f[2]}
-        m.ingest(topic.encode(), f)
-        if m.meta:
-            seen.add(m.gpu_in_run())
-    assert seen == {False} and m.n_fallback >= 1
-    m = feed(hud.HudModel(), "m3", stop=(0, 60))
-    alt = {"vla": ["tt"], "wbc": ["x280", "ort", "gpu"]}
-    m.ingest(b"meta", {**m.meta, "targets": alt})
-    assert m.gpu_in_run()
-    m.ingest(b"meta", {**m.meta, "targets": alt, "processor": {**m.meta["processor"], "wbc": "cuda-graph:rtx5090"},
-                       "current": {"vla": "tt", "wbc": "gpu"}})  # swapped to the GPU target (key w)
-    assert m.gpu_in_run()
-
-
-def test_blackhole_box_notes_without_the_gpu(pg):
-    """The freed row: each Blackhole engine gets a line with what it is doing, from the status streams, or the
-    loop's round trip without them."""
+def test_blackhole_box_notes(pg):
+    """Each Blackhole engine gets a line with what it is doing, from the status streams, or the loop's round trip
+    without them."""
     m, now = chip_model(x280=False)
     x280_stream(m, now)
     view = draw(pg, m, now)[1]
