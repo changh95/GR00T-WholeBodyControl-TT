@@ -34,15 +34,17 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/_x280.sh"
 need_x280 boot:3 attach
 need_vla
-need_rt_cores "rt_sim (CPUs 2/3), the GPU WBC (CPU 4) and the HUD (CPUs 6-7)"
+need_rt_cores "rt_sim (CPUs 2/3) and the HUD (CPUs 6-7)"
 M3J=$RT/x280/tools/m3_jobs.py
 dur=${M3_SOAK_DURATION:-7200}
-swap=${M3_SOAK_SWAP_S:-10}
+# The user (2026-10-25): the GPU WBC has no place in M3, so T-3.9 is an X280-only soak by default (no swaps; the
+# HUD's fault/fallback demo uses the host-CPU ORT only). M3_SOAK_SWAP_S=N restores the PLAN's x280 -> ort -> gpu cycle.
+swap=${M3_SOAK_SWAP_S:-0}
 tag=${M3_SOAK_TAG:-t39}
 runs=$CHIP_SESSION_DIR/runs_$tag
 gates=$CHIP_SESSION_DIR/gates_$tag.yaml
 # shellcheck disable=SC2206  # option lists, split on whitespace
-demo_opts=(${M3_SOAK_DEMO_ARGS---hud --record})
+demo_opts=(${M3_SOAK_DEMO_ARGS---hud --record --no-alt})
 # shellcheck disable=SC2206
 loop_extra=(${M3_SOAK_LOOP_ARGS:-})
 case " ${demo_opts[*]} " in
@@ -61,10 +63,13 @@ dry=()
 job_dry && dry=(--dry-run)
 demo=(env DEMO_LOG_ROOT="$CHIP_SESSION_DIR/demo_logs" "$RT/scripts/demo.sh" m3 --in-session "${demo_opts[@]}"
       "${dry[@]}" --vla "$CHIP_VLA_URL" --wbc "$CHIP_X280_URL" --seeds "${M3_SOAK_SEEDS:-3000-}" --duration "$dur"
-      --swap-wbc-every "$swap" --tag "$tag" -- --s 16 --B 0 --d-init 3 --crn --warmup 20 --runs-root "$runs"
-      "${loop_extra[@]}")
-job_log "T-3.9 soak: ${dur}s RT, VLA $CHIP_VLA_URL, WBC $CHIP_X280_URL (x280d --$(x280_boot_flag)) swapped every" \
-    "${swap}s, tag $tag: ${demo[*]}"
+      --tag "$tag")
+[ "$swap" != 0 ] && demo+=(--swap-wbc-every "$swap")
+demo+=(-- --s 16 --B 0 --d-init 3 --crn --warmup 20 --runs-root "$runs" "${loop_extra[@]}")
+swap_flag=()
+[ "$swap" = 0 ] && swap_flag=(--no-swaps)
+job_log "T-3.9 soak: ${dur}s RT, VLA $CHIP_VLA_URL, WBC $CHIP_X280_URL (x280d --$(x280_boot_flag)), swap every" \
+    "${swap}s (0 = X280 only), tag $tag: ${demo[*]}"
 if job_dry; then
     "${demo[@]}" || job_exit 2
     echo "simpy $RT/scripts/analyze_run.py <run dir in $runs> --gates t39 --gates-file $gates"
@@ -86,7 +91,7 @@ run=$(find "$runs" -mindepth 1 -maxdepth 1 -type d -name "*_$tag" 2>/dev/null | 
 simpy "$RT/scripts/analyze_run.py" "$run" --gates t39 --gates-file "$gates"
 gate_rc=$?
 [ "$gate_rc" = 2 ] && job_exit 2
-simpy "$M3J" t39-summary "$run/verdict.json" "$run/ticks.npy" "$before" "$after" "$t0" "$t1" "$loop_rc" \
+simpy "$M3J" t39-summary "${swap_flag[@]}" "$run/verdict.json" "$run/ticks.npy" "$before" "$after" "$t0" "$t1" "$loop_rc" \
     "$CHIP_SESSION_DIR/t39_summary.json" "$CHIP_SESSION_DIR/x280d_status.jsonl" \
     "$CHIP_SESSION_DIR/x280d_attach/x280d_status.jsonl"
 sum_rc=$?

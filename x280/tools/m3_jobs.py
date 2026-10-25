@@ -469,7 +469,8 @@ def _tile_traps(status: Optional[dict]) -> dict:
     return {t: (v or {}).get("n_traps") for t, v in ((status or {}).get("tiles") or {}).items()}
 
 
-def t39_summary(verdict, ticks, before, after, status_logs, t0: float, t1: float, loop_rc: int) -> dict:
+def t39_summary(verdict, ticks, before, after, status_logs, t0: float, t1: float, loop_rc: int,
+                swaps: bool = True) -> dict:
     """T-3.9's rows besides analyze_run's t39 set: 0 traps (every tile's L36 n_traps unchanged from x280d's status
     before the soak to after it and in every status read between) and x280d's own record (calls > 0; 0 timeouts,
     faults, stalls, interlock or degraded replies: no unplanned fallback on its side either); |da| at every swap
@@ -506,7 +507,10 @@ def t39_summary(verdict, ticks, before, after, status_logs, t0: float, t1: float
              and set(traps_between) <= {"0"}}
     pll = {"reads": len(rows), "not_default_at": pll_bad[:20], "max_gap_s": round(gap, 3),
            "gap_max_s": T39_STATUS_GAP_S, "pass": bool(rows) and not pll_bad and gap <= T39_STATUS_GAP_S}
-    sw = swap_da(ticks) if ticks and Path(ticks).exists() else {"swaps": 0, "pass": False, "why": "no ticks.npy"}
+    if not swaps:  # X280-only soak (the default since 2026-10-25): no planned swap, so no |da| row to gate
+        sw = {"swaps": 0, "pass": True, "applicable": False, "why": "X280-only soak (--no-swaps)"}
+    else:
+        sw = swap_da(ticks) if ticks and Path(ticks).exists() else {"swaps": 0, "pass": False, "why": "no ticks.npy"}
     s = {"gates_pass": v.get("pass"), "x280d_during_soak": delta, "x280d_ok": x280d_ok, "traps": traps,
          "pll4": pll, "swap_da": sw, "loop_rc": int(loop_rc), "window": [t0, t1]}
     s["pass"] = bool(v.get("pass") is True and x280d_ok and traps["pass"] and pll["pass"] and sw["pass"]
@@ -549,6 +553,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("t39-gates")
     p.add_argument("dst", type=Path)
     p = sub.add_parser("t39-summary")
+    p.add_argument("--no-swaps", action="store_true", help="X280-only soak: the swap |da| row does not apply")
     for a in ("verdict", "ticks", "before", "after"):
         p.add_argument(a)
     p.add_argument("t0", type=float)
@@ -578,7 +583,8 @@ def main(argv=None) -> int:
         elif a.cmd == "t39-gates":
             r, ok = t39_gates(a.dst), True
         elif a.cmd == "t39-summary":
-            r = t39_summary(a.verdict, a.ticks, a.before, a.after, a.status_logs, a.t0, a.t1, a.loop_rc)
+            r = t39_summary(a.verdict, a.ticks, a.before, a.after, a.status_logs, a.t0, a.t1, a.loop_rc,
+                            swaps=not a.no_swaps)
             Path(a.out).write_text(json.dumps(r, indent=1))
             ok = r["pass"]
         else:

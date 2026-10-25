@@ -843,4 +843,12 @@ def test_t39_summary_rows(tmp_path):
     r = subprocess.run([sys.executable, str(M3J), "t39-summary", str(v), str(ticks), str(before), str(after), "95",
                         "165", "0", str(out), str(good)], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
+    # X280-only soak (the default since 2026-10-25, no GPU WBC in M3): no swap row to gate, even with no swap in ticks
+    flat = _ticks(tmp_path, [2, 2, 2, 2, 2], [7e-3] * 5)
+    assert not M.t39_summary(v, flat, before, after, [good], 95.0, 165.0, 0)["pass"]  # swaps expected, none found
+    s = M.t39_summary(v, flat, before, after, [good], 95.0, 165.0, 0, swaps=False)
+    assert s["pass"] and s["swap_da"]["applicable"] is False
+    r = subprocess.run([sys.executable, str(M3J), "t39-summary", "--no-swaps", str(v), str(flat), str(before),
+                        str(after), "95", "165", "0", str(out), str(good)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and json.loads(out.read_text())["swap_da"]["applicable"] is False, r.stdout + r.stderr
     assert json.loads(out.read_text())["pass"]
