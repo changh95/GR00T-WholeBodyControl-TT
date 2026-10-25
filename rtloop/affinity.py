@@ -8,7 +8,6 @@ reset window repeats the bracket because robosuite re-creates its renderer there
 The onscreen viewer is a separate process (rtloop.viewer_proc) on the aux CPUs it shares with the HUD.
 """
 
-from contextlib import contextmanager
 import os
 from pathlib import Path
 
@@ -27,16 +26,6 @@ def pin_current(cpu: int | set[int] | None) -> None:
 
 def current() -> list[int]:
     return sorted(os.sched_getaffinity(0))
-
-
-@contextmanager
-def on_cpu(cpu: int | None, then: int | None):
-    """Run a block on `cpu` (threads created inside inherit it), then move to `then`."""
-    pin_current(cpu)
-    try:
-        yield
-    finally:
-        pin_current(then)
 
 
 def zmq_context(cpu: int | None = HELPER_CPU):

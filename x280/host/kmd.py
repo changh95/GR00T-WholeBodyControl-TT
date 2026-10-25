@@ -225,9 +225,6 @@ class Wcio:
     def avx512_ok(self) -> bool:
         return bool(self.lib.wcio_avx512_ok())
 
-    def avx_ok(self) -> bool:
-        return bool(self.lib.wcio_avx_ok())
-
     def force_no_avx512(self, on: bool) -> None:
         self.lib.wcio_force_no_avx512(int(on))
 
@@ -244,9 +241,6 @@ class Wcio:
     def uc_store64(self, dst: int, src: int, nwords: int) -> None:
         if self.lib.wcio_uc_store64(dst, src, nwords):
             raise WcioError(f"wcio_uc_store64(0x{dst:x}, {nwords}): misaligned or empty (nothing written)")
-
-    def sfence(self) -> None:
-        self.lib.wcio_sfence()
 
     def uc_write32(self, addr: int, value: int) -> None:
         if self.lib.wcio_uc_write32(addr, value & 0xFFFF_FFFF):
