@@ -65,7 +65,7 @@ def _hex(v) -> Optional[str]:
 def pll_view(e0: Optional[dict]) -> dict:
     """What boot steps 6/8 depend on, from one E0 result: kmd.pll4_step_to re-reads CNTL_0 and PLL_LOCK before every
     walk write and stops unless CNTL_0 & 0x1F == 0x12 (running, not bypassed) and PLL_LOCK bit 4 is set (review F5;
-    taken from the CMFW sources, unverified on silicon until S1c records it)."""
+    taken from the CMFW sources; S1c read CNTL_0 0x12 and PLL_LOCK 0x1F on silicon)."""
     e0 = e0 or {}
     pll = e0.get("pll4") or {}
     c0, lock = pll.get("cntl_0"), e0.get("pll_lock")

@@ -1,7 +1,7 @@
 """Marks every new MuJoCo viewer window always-on-top (without taking keyboard focus).
 
-robosuite destroys and relaunches the viewer on each episode reset, and the new window opens
-behind the focused terminal, so this keeps watching for new ones.
+The loop's viewer process (rtloop/viewer_proc.py) opens its window behind the focused terminal, and the window
+may appear after this starts, so this keeps watching for new ones.
 """
 
 import time

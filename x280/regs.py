@@ -8,7 +8,7 @@ Every number carries a citation. Source tags (paths relative to RT = ~/experimen
   BHL  third_party_refs/tt-bh-linux                               (9f9597d)
   LUW  third_party_refs/luwen                                     (ecef1a8)
   REF  x280/refs (SiFive ccache0/BEU layouts; URLs and sha256 in x280/refs/SOURCES.txt)
-  PLAN ~/experiments/gr00t/docs/plan/vla-wbc-x280/PLAN.md (rev 2)
+  PLAN docs/plan/vla-wbc-x280/PLAN.md (rev 2)
 
 The write policy is data here (ALLOW, DENY) plus the pure classifier `classify_write`; the
 stateful rules (one L2CPU_RESET RMW per session, the PLL4 step order, LIM init before any partial

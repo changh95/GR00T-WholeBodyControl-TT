@@ -1,7 +1,7 @@
 # rtloop module contracts (M1, and the M2/M3 contracts M1 code consumes)
 
 This file is the contract between the M1 modules. `PLAN.md` is the design
-(`~/experiments/gr00t/docs/plan/vla-wbc-x280/PLAN.md`, §1–§4); this file fixes the Python APIs so
+(`docs/plan/vla-wbc-x280/PLAN.md`, §1–§4); this file fixes the Python APIs so
 the modules can be built in parallel. `rtloop/schema.py` and `rtloop/wire.py` are already written
 and are shared by everything; change them only by adding, never by renaming. The sections after
 "viewer.py + viewer_proc.py" summarise the M2/M3 contracts (rttt, chip sessions, the X280 kernel,
@@ -373,7 +373,7 @@ when unknown, never invented:
   `seq_done`, `cycles_last`, `cycles_max`, `compute_us_last`, `duty` (compute µs / 20 ms over the last 50 calls),
   `x280d_us_last` / `x280d_us_p50` / `x280d_us_p99` (x280d's request-in to reply-ready µs over the last 50 OK rows of
   the tick ring), `calls_ok` (W-WBC calls served with an action since start; 0 before any), `n_runs`, `n_overrun`,
-  `n_reentry`, `beu_accrued`, `ccache_ecc {fix, fail}` (COUNT registers, at most 1 Hz), `variant` ("v2") and `dtype`
+  `n_reentry`, `beu_accrued`, `ccache_ecc {fix, fail}` (COUNT registers, at most 1 Hz), `variant` ("v3") and `dtype`
   ("fp16") as two fields, `fw_ver`, `build_id`, `telemetry`. The kernel is deterministic (`compute_us_last`,
   `cycles_*` and `duty` repeat call after call, 278.07 µs / 222,455 cycles for v3-fp16) and a 0.28 ms call every
   20 ms is almost never in flight at a snapshot, so `monitor_state` reads idle: what moves while x280d serves is
@@ -536,7 +536,7 @@ The contract between the kernel, the firmware and x280d. `wbc_infer(blob, policy
 size, CRC, layout, policy, variant, dtype). Variants v0 (scalar fp32, the bit-parity reference), v1 (RVV fp32, riscv
 only), v2 (fp16 weights widened with integer ops, fp32 math; RVV on riscv), v2s (scalar fp16), v3 (fp16, bit-identical
 to v2 on every input with one vector op fewer per weight: v2's exact 2^112 scale on x[i]; RVV e32m8 asm on riscv, the
-same arithmetic in scalar code on x86; not the default until silicon E4/E5a pass); `wbc_variants_built()` is 0b11101
+same arithmetic in scalar code on x86; the fp16 default since E4/E5a passed on silicon); `wbc_variants_built()` is 0b11101
 on x86, 0b11111 on riscv+V. Blob v1: 320 B header (`magic` "WBCB" @0, version, hdr_bytes, total_len,
 `crc32` @16 = zlib CRC-32 over bytes [20, total_len), wdtype, layout W^T [in][out], policy_mask, n_layers 7,
 align 64, the source .onnx CRCs, 2 × 7 layer descriptors, a 32 B tag); weights transposed in 64 B-aligned arrays,

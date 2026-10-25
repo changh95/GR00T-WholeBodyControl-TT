@@ -33,7 +33,7 @@ No repository file was changed, the Blackhole was not opened, and the GR00T serv
 | `W` | `R/external_dependencies/GR00T-WholeBodyControl` |
 | `TT` | `~/experiments/gr00t/tt-metal/models/experimental/gr00t` (live tree, untracked in git) |
 | `MK` | `~/experiments/gr00t/publish/worktree-mk` (frozen snapshot 009de892, env `publish/worktree-mk-env.sh`) |
-| `RT` | `~/experiments/gr00t/rtloop` (**new** git repo; all new code goes here) |
+| `RT` | `~/experiments/GR00T-WholeBodyControl-TT` (**new** git repo; all new code goes here; `~/experiments/gr00t/rtloop` is a compat symlink to it) |
 | `P` | `docs/plan/vla-wbc-x280` |
 | `S` | `/tmp/claude-1000/-home-deepgadget-isaacsim/bfbe65f0-1b38-425e-84fc-4937eb211a38/scratchpad` |
 | `X` | `S/plan_research/x280/src` (copied to `RT/third_party_refs/` in WP-1.0) |
@@ -503,7 +503,7 @@ writer of LIM, writes L40–L41 (body first, `chunk_seq` last).
 
 ## 2. Milestones, work packages, acceptance tests
 
-`source ~/experiments/gr00t/rtloop/env.sh` defines `R W RT DEV DEVX`, the wrappers `simpy srvpy ttpy xpy`, the URLs
+`source ~/experiments/GR00T-WholeBodyControl-TT/env.sh` defines `R W RT DEV DEVX`, the wrappers `simpy srvpy ttpy xpy`, the URLs
 `VLA_GPU=tcp://127.0.0.1:5565 VLA_TT=tcp://127.0.0.1:5557 WBC_GPU=tcp://127.0.0.1:5556 WBC_X280=tcp://127.0.0.1:5558`
 and `ONNX=$W/gr00t_wbc/sim2mujoco/resources/robots/g1/policy`.
 

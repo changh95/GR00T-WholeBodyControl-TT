@@ -1,6 +1,6 @@
 # rtloop tests (M1, plus the HUD, M2 and M3 CPU suites)
 
-How to run each test, what it checks (test ids are from `~/experiments/gr00t/docs/plan/vla-wbc-x280/PLAN.md`
+How to run each test, what it checks (test ids are from `docs/plan/vla-wbc-x280/PLAN.md`
 §2), and the result of the last full run (RTX 5090, Ryzen 9 7950X). Every command assumes
 `source ~/experiments/GR00T-WholeBodyControl-TT/env.sh`, which defines `simpy`, `srvpy`, `ttpy`, `xpy`, `$RT`, `$R` and the ports.
 
@@ -217,14 +217,11 @@ and the loop's process group, and its window title still starts with "MuJoCo" (`
 - T-1.2b `test_alignment.py`: the 9 VL tests passed (d_inj 1, 3, 8, run from a copy without the RT arm). The 3
   `rt_60ms` tests were not run: that loop has no `--no-affinity` and would have pinned CPU 2 during T-1.9.
 
-Driver scripts: `/tmp/claude-1000/-home-deepgadget-isaacsim/bfbe65f0-1b38-425e-84fc-4937eb211a38/scratchpad/vproc/`
-(`model_diff.py`, `robust.py`, `stress_close.py`, `vl_viewer.sh`).
-
 ## Not run as tests here
 
 | PLAN id | Why |
 |---|---|
-| T-1.4 RT timing, official config | Needs `demo.sh m1 --hud --record` with the viewer on, which needs a GUI. A headless run cannot pass it by accident: its viewer gates fail with "no data". To be rerun after the viewer moved out of process (below): `viewer_us` is now the shared-memory publish and `sim_us` no longer contains `viewer.sync`. |
+| T-1.4 RT timing, official config | Needs `demo.sh m1 --hud --record` with the viewer on, which needs a GUI. A headless run cannot pass it by accident: its viewer gates fail with "no data". Rerun after the viewer moved out of process (below): PASS 18/18 (t14e, `docs/plan/vla-wbc-x280/results/M1.md`). |
 | T-1.5 negative control | Optional, and uses :5555 for both the VLA and the WBC. Agents do not run it. |
 | T-1.8 screen, T-1.9 comparison | Campaigns of hours (`scripts/eval_paired.py --matrix configs/eval_m1_{screen,primary}.yaml`). The verdict logic is covered by `test_telemetry.py` and `test_review_robustness.py`. |
 | T-1.10 liveness (2 h) | A 2 h RT run against the GPU servers. Its RSS criterion was measured in VL mode instead (below). |
@@ -232,8 +229,7 @@ Driver scripts: `/tmp/claude-1000/-home-deepgadget-isaacsim/bfbe65f0-1b38-425e-8
 ## RSS over many episodes (T-1.10 risk)
 
 Measured in VL mode (`--mode vl --arm v1 --s 16 --d-inj 4`, mock `detfn`, ORT WBC), 30 episodes of 1440 ticks per
-configuration. RSS is taken at each episode end, after the TickLog has released its pages. Driver script:
-`/tmp/claude-1000/-home-deepgadget-isaacsim/bfbe65f0-1b38-425e-84fc-4937eb211a38/scratchpad/fix/rss_vl3.py`.
+configuration. RSS is taken at each episode end, after the TickLog has released its pages.
 
 | Configuration | ep 1 | ep 30 | ep 1 → 30 | Slope after ep 10 | 220-episode projection (≈ 2 h) |
 |---|---:|---:|---:|---:|---:|
