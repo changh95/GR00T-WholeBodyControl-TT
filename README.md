@@ -10,18 +10,20 @@ the WBC runs every tick while the VLA produces 30-row action chunks asynchronous
 [![G1 apple-to-plate: GR00T N1.6 on Blackhole Tensix, gear_wbc WBC on the on-die X280](docs/media/demo_seed2000.gif)](https://github.com/changh95/GR00T-WholeBodyControl-TT/releases/download/demo-videos/g1_tensix_vla_x280_wbc_seed2000.mp4)
 
 One Blackhole p150a runs the whole stack: GR00T N1.6 on the Tensix grid, the gear_wbc whole-body MLP on the chip's
-X280 (L2CPU3 hart 0, 800 MHz; 0.385 ms per call in these recordings, 0.278 ms with the current v3 kernel), the 50 Hz
-loop on the host. Left: the MuJoCo viewer; right: the live HUD
-(processor map, Blackhole panel with the Tensix megakernel layout and the X280 status, ego view of the active chunk).
-Full-resolution recordings (1920x1080): [seed 2000, success at tick 854](https://github.com/changh95/GR00T-WholeBodyControl-TT/releases/download/demo-videos/g1_tensix_vla_x280_wbc_seed2000.mp4),
-[seed 2009, success at tick 1283](https://github.com/changh95/GR00T-WholeBodyControl-TT/releases/download/demo-videos/g1_tensix_vla_x280_wbc_seed2009.mp4).
+X280 (L2CPU3 hart 0, 800 MHz, v3 kernel, 0.278 ms per call), the 50 Hz loop on the host. Left: the MuJoCo viewer;
+right: the live HUD (processor map, Blackhole panel with the Tensix megakernel layout and the X280 status: serving rate,
+heartbeat rate, per-call time; ego view of the active chunk). Full-resolution recordings (1920x1080):
+[seed 2000, success at tick 854](https://github.com/changh95/GR00T-WholeBodyControl-TT/releases/download/demo-videos/g1_tensix_vla_x280_wbc_seed2000.mp4),
+[seed 2002, tick 667](https://github.com/changh95/GR00T-WholeBodyControl-TT/releases/download/demo-videos/g1_tensix_vla_x280_wbc_seed2002.mp4),
+[seed 2009, tick 1283](https://github.com/changh95/GR00T-WholeBodyControl-TT/releases/download/demo-videos/g1_tensix_vla_x280_wbc_seed2009.mp4).
+The checkpoint succeeds in about 20-30% of episodes in this env on any backend (M3.md); these seeds succeed every run.
 
 | Milestone | VLA | WBC | Status |
 |---|---|---|---|
 | M1 | RTX 5090 | RTX 5090 (CUDA graph) | done: async loop costs no success (T-1.9), RT timing 18/18 (T-1.4) |
 | M2 | Blackhole Tensix | RTX 5090 | done: TT vs GPU no success drop (T-2.5, T-2.7), 2 h RT soak 20/20 (T-2.8) |
 | M3 | Blackhole Tensix | Blackhole X280 (L2CPU3) | done: closed loop 21/21 (T-3.7), no success drop vs GPU WBC, fault recovery (T-3.8), 107 min soak with 0 WBC fallbacks (T-3.9) |
-| next | | X280, 4 tiles x up to 4 harts | single-hart kernel done (v3, 0.278 ms); next tensor-parallel across L2CPU0-3 |
+| next | | X280, 4 tiles x up to 4 harts | single-hart kernel done (v3, 0.278 ms); S5a: all four L2CPU tiles probe clean; tensor-parallel firmware not yet written |
 
 Results: `docs/plan/vla-wbc-x280/results/` (M1.md, M2.md, M3.md). Design and test plan: `docs/plan/vla-wbc-x280/PLAN.md`.
 Module contracts: `INTERFACES.md`. Test suites and how to run them: `TESTING.md`.

@@ -1,6 +1,7 @@
 """Cut one successful episode out of a demo recording and lay the MuJoCo viewer and the HUD side by side (1920x1080).
 
 usage: cut_success.py RUN_DIR DEMO_MP4 EPISODE OUT.mp4 --rec-start-epoch S --ff FFMPEG [--wbc-caption TEXT]
+       [--tail-s T]
 Tick times (CLOCK_MONOTONIC) map to recording time through the wall-clock offset and the recorder's start time
 (S = the recording's birth time, `stat -c %W demo.mp4`); run it on the machine that recorded, in the same boot.
 The crop boxes assume scripts/video/arrange_windows.py's layout on a 2560x2880 screen recorded at 1920 wide.
@@ -19,7 +20,8 @@ k = np.asarray(t["k"])[m]; ts = np.asarray(t["t_start_ns"], np.int64)[m]; succ =
 mono2wall = time.time() - time.monotonic()
 t0 = ts[0] / 1e9 + mono2wall - rec_start - 2.0  # 2 s of lead-in
 i_s = int(np.argmax(succ)) if succ.any() else len(ts) - 1
-t1 = ts[i_s] / 1e9 + mono2wall - rec_start + 4.0  # 4 s after the success tick
+tail = float(sys.argv[sys.argv.index("--tail-s") + 1]) if "--tail-s" in sys.argv else 4.0
+t1 = ts[i_s] / 1e9 + mono2wall - rec_start + tail  # after the success tick (the env resets right after it)
 eps = [json.loads(l) for l in open(run / "episodes.jsonl")]
 e = next(x for x in eps if x["ep"] == ep)
 s = 0.75  # the recorder scales 2560 -> 1920 wide
