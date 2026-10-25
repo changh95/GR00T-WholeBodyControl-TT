@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The verdict logic of the M3 device-session jobs, kept out of their shell heredocs so a CPU test can run it
-(PLAN.md WP-3.5, WP-3.8, WP-3.9; jobs/s1c.sh, jobs/s1d.sh, jobs/m3_shadow.sh, jobs/m3_eval.sh, jobs/m3_soak.sh;
-tests/x280/test_m3_jobs.py).
+(PLAN.md WP-3.5, WP-3.8, WP-3.9; jobs/s1c.sh, jobs/s1d.sh, jobs/m3_shadow.sh, jobs/m3_eval.sh, jobs/m3_faults.sh,
+jobs/m3_soak.sh; tests/x280/test_m3_jobs.py).
 
     python3 $RT/x280/tools/m3_jobs.py s1c-summary SESSION_DIR E1A_OK METHOD [k=rc ...]   # S1c + S2 go/no-go
     python3 $RT/x280/tools/m3_jobs.py s1d-summary SESSION_DIR [k=rc ...]                 # S1d: lim-init store
@@ -9,12 +9,13 @@ tests/x280/test_m3_jobs.py).
     python3 $RT/x280/tools/m3_jobs.py t37-summary VERDICT BEFORE AFTER DUMP BENCH|none OUT
     python3 $RT/x280/tools/m3_jobs.py t36-gates OUT_YAML DTYPE
     python3 $RT/x280/tools/m3_jobs.py t36-summary VERDICT DTYPE LOOP_RC OUT
+    simpy $RT/x280/tools/m3_jobs.py t38-summary RUN EVENTS ATTACH_LOG PARK_JSON LOOP_RC OUT  # T-3.8 (m3_faults.sh)
     python3 $RT/x280/tools/m3_jobs.py t39-gates OUT_YAML                                  # T-3.9 (jobs/m3_soak.sh)
     simpy $RT/x280/tools/m3_jobs.py t39-summary VERDICT TICKS BEFORE AFTER T0 T1 LOOP_RC OUT STATUS_JSONL...
 
 Each prints its JSON result as the last stdout line and exits 0 (pass / written), 1 (a check failed), 2 (bad input).
-Stdlib only, except m3-gates (PyYAML) and t39-summary (numpy, for ticks.npy): run those with simpy. Absolute paths:
-simpy runs from $R.
+Stdlib only, except m3-gates (PyYAML), t38-summary and t39-summary (numpy, for ticks.npy): run those with simpy.
+Absolute paths: simpy runs from $R.
 """
 
 from __future__ import annotations
@@ -417,6 +418,75 @@ def t36_summary(verdict, dtype: str, loop_rc: int) -> dict:
     return s
 
 
+# --- T-3.8 (jobs/m3_faults.sh) -------------------------------------------------------------------------------------
+
+T38_CASES = ("kill9_x280d", "park_start", "inject_crc")  # m3_faults.sh's events, one per case
+T38_WINDOW_NS = 20_000_000_000  # a case's ticks: the 20 s after its event
+T38_PERIOD_MAX_MS = 30.0  # tick to tick inside one episode after a case: no tick missed while ORT takes over
+
+
+def _load_ticks(ticks):
+    """TickLog ticks.npy up to its committed length, as rtloop.telemetry.load_ticks (min of the header and the
+    ticks.len sidecar); numpy, so the summaries that read ticks run under simpy."""
+    import numpy as np
+
+    t = np.load(ticks)
+    try:
+        t = t[:min(len(t), int((Path(ticks).parent / "ticks.len").read_text().split()[0]))]
+    except (OSError, IndexError, ValueError):
+        pass
+    return t
+
+
+def t38_summary(run, events, attach_log, park, loop_rc: int) -> dict:
+    """T-3.8: per case, the ticks of the 20 s after its event (m3_faults.sh's t38_events.jsonl, monotonic ns like
+    TickLog t_start_ns): rt_sim fell back (wbc_fb: ORT served the failed call on the same tick), the tick period
+    stayed under 30 ms between consecutive ticks of one episode (an env reset between episodes, ~4.3 s on the G1, is
+    not a WBC period: S4 2026-10-25 failed every case on it), and the X280 served again after the first fallback
+    (a fault must not cost the tile: S4's PARK ran a stale stage 0 and every later call stalled). Also: the PARK
+    step passed (warm entry, n_reentry + 1: t38_park.json), no SAFETY_FAULT, no fall, the restarted x280d attached
+    and its log has no release step, loop rc 0."""
+    import numpy as np
+
+    t = _load_ticks(Path(run) / "ticks.npy")
+    ev = [json.loads(x) for x in Path(events).read_text().splitlines() if x.strip()]
+    eps = [json.loads(x) for x in (Path(run) / "episodes.jsonl").read_text().splitlines() if x.strip()]
+    fb, ts, ep = t["wbc_fb"].astype(bool), t["t_start_ns"], t["ep"]
+    res = {"cases": {}, "fallback_ticks": int(fb.sum()), "episodes": len(eps), "loop_rc": int(loop_rc),
+           "safety_faults": int(sum(e.get("end") == "SAFETY_FAULT" for e in eps)),
+           "falls": int(sum(e.get("end") == "FALL" for e in eps))}
+    for name in T38_CASES:
+        e = next((x for x in ev if x["event"] == name), None)
+        if e is None:
+            res["cases"][name] = {"ran": False}
+            continue
+        idx = np.where((ts >= e["mono_ns"]) & (ts < e["mono_ns"] + T38_WINDOW_NS))[0]
+        f = fb[idx]
+        first = int(np.argmax(f)) if f.any() else None
+        same_ep = ep[idx][1:] == ep[idx][:-1]
+        gaps = np.diff(ts[idx])[same_ep]
+        res["cases"][name] = {
+            "ran": True, "ticks": int(idx.size), "fallback_ticks": int(f.sum()),
+            "first_fallback_tick_after_event": first,
+            "served_after_fallback": int((~f[first + 1:]).sum()) if first is not None else 0,
+            "max_period_ms_after": float(gaps.max() / 1e6) if gaps.size else None,
+            "episode_ends_in_window": int((~same_ep).sum())}
+    pk = _json(park) or {}
+    res["park"] = {k: pk.get(k) for k in ("pass", "n_reentry", "state", "resume_s", "why")}
+    try:
+        log = Path(attach_log).read_text() if attach_log else ""
+    except OSError:
+        log = ""
+    res["attach_released"] = "L2CPU_RESET RMW" in log or "step 7:" in log
+    res["attach_ok"] = "READY" in log and "attach:" in log
+    ok_cases = all(c.get("ran") and c["fallback_ticks"] > 0 and c["served_after_fallback"] > 0
+                   and (c["max_period_ms_after"] if c["max_period_ms_after"] is not None else 99) < T38_PERIOD_MAX_MS
+                   for c in res["cases"].values())
+    res["pass"] = bool(ok_cases and res["park"]["pass"] is True and not res["safety_faults"] and not res["falls"]
+                       and not res["attach_released"] and res["attach_ok"] and res["loop_rc"] == 0)
+    return res
+
+
 # --- T-3.9 (jobs/m3_soak.sh) --------------------------------------------------------------------------------------
 
 T39_GATES = {"period_p99_ms": 21.0, "slips_max": 0, "wbc_fallback_frac_max": 0.0}  # PLAN T-3.9's loop rows
@@ -442,11 +512,7 @@ def swap_da(ticks) -> dict:
     A swap whose needed shadow_da is missing (NaN) counts as no data, which fails."""
     import numpy as np
 
-    t = np.load(ticks)
-    try:  # the committed length, as rtloop.telemetry.load_ticks (min of the header and the ticks.len sidecar)
-        t = t[:min(len(t), int((Path(ticks).parent / "ticks.len").read_text().split()[0]))]
-    except (OSError, IndexError, ValueError):
-        pass
+    t = _load_ticks(ticks)
     be, sd, ep, k = t["wbc_be"].astype(int), t["shadow_da"].astype(np.float64), t["ep"], t["k"]
     served = np.isfinite(t["wbc_rtt_us"]) & ~t["wbc_fb"].astype(bool)
     idx = np.where((be[1:] != be[:-1]) & (ep[1:] == ep[:-1]) & (k[1:] == k[:-1] + 1) & served[1:] & served[:-1])[0]
@@ -550,6 +616,11 @@ def main(argv=None) -> int:
     p = sub.add_parser("t36-summary")
     for a in ("verdict", "dtype", "loop_rc", "out"):
         p.add_argument(a)
+    p = sub.add_parser("t38-summary")
+    for a in ("run", "events", "attach_log", "park"):
+        p.add_argument(a)
+    p.add_argument("loop_rc", type=int)
+    p.add_argument("out")
     p = sub.add_parser("t39-gates")
     p.add_argument("dst", type=Path)
     p = sub.add_parser("t39-summary")
@@ -580,6 +651,10 @@ def main(argv=None) -> int:
             ok = r["pass"]
         elif a.cmd == "t36-gates":
             r, ok = t36_gates(a.dst, a.dtype), True
+        elif a.cmd == "t38-summary":
+            r = t38_summary(a.run, a.events, _opt(a.attach_log), a.park, a.loop_rc)
+            Path(a.out).write_text(json.dumps(r, indent=1))
+            ok = r["pass"]
         elif a.cmd == "t39-gates":
             r, ok = t39_gates(a.dst), True
         elif a.cmd == "t39-summary":

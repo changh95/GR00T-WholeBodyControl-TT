@@ -9,7 +9,9 @@
  * gives VLMAX = VLEN >= 64 for any legal VLEN, so the store is a whole line), writes the done word
  * 0x081E_0000 to the last LIM line (0x081D_FFC0), then spins on the entry word in the line before it
  * (0x081D_FF80, written by the host; one writer per line). When the entry word is non-zero it runs
- * fence.i and jumps there (crt0). Harts 1-3 wait in wfi.
+ * fence.i and jumps there (crt0); the `jr a0` after that fence.i is fetched again from this 64 B line, so
+ * hart 0's L1I holds stage 0 until a fence.i of its own drops it (crt0's on entry; the FENCE_I x280d sends
+ * after it swaps the park stub in). Harts 1-3 wait in wfi.
  * sp is used only as a pointer, so that c.addi16sp/c.swsp/c.lwsp keep the stub inside 64 B.
  */
     .section .stage0, "ax"

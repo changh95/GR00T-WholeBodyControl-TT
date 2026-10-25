@@ -1687,7 +1687,9 @@ class Kmd:
     def write_gp_scratch(self, tile: int, code: bytes) -> None:
         """Park stub (+ RNMI-exception spin stub at +48) into the 64 B GP scratch, read back (WP-3.2, E1F). The GP
         scratch is the RNMI handler code, so after the release it is never rewritten, with one exception: E1F swaps
-        stage 0 for the park stub once, after the monitor came up (PLAN §5.2 "E1F stage-0 initializer")."""
+        stage 0 for the park stub once, after the monitor came up (PLAN §5.2 "E1F stage-0 initializer"). Hart 0 runs
+        the new stub on its next RNMI only after a fence.i of its own has dropped stage 0's line from its L1I: crt0's
+        on entry and the FENCE_I x280d sends after the swap (the host cannot invalidate a hart's L1I, Caches.md:22)."""
         if len(code) > regs.GP_SCRATCH_SIZE:
             raise PolicyError(f"GP scratch holds {regs.GP_SCRATCH_SIZE} B, got {len(code)}")
         swap = self._stage0.get(tile) == "entered"

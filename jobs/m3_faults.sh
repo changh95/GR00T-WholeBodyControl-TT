@@ -18,8 +18,11 @@
 #            trigger bit still set and finishes the PARK protocol itself (review F8).
 #   t0+90 s  case 3: `x280d inject crc`: the next INFER carries a wrong obs CRC; the monitor retries 50 us, reports
 #            FAULT 0xC0C, x280d answers with an error.
-# Pass (T-3.8): for each case rt_sim falls back within 1 tick (ORT on the same call), no SystemExit (SAFETY_FAULT),
-# no fall, the episode continues, and the restarted x280d did not write L2CPU_RESET (its log has no release step).
+# Pass (T-3.8; x280/tools/m3_jobs.py t38-summary): for each case rt_sim falls back within 1 tick (ORT on the same
+# call), the tick period stays < 30 ms between ticks of one episode (an env reset between episodes is not a WBC
+# period), and the X280 serves again after the fallback; the PARK step passed (t38_park.json: warm entry,
+# n_reentry + 1); no SystemExit (SAFETY_FAULT), no fall, the episode continues, and the restarted x280d did not
+# write L2CPU_RESET (its log has no release step).
 # Env: M3_FAULT_DURATION (150 s), M3_FAULT_GAP_S (30 s between the cases; >= 3, and the run must outlast case 3),
 # M3_FAULT_SEEDS (2100-); M3_LOOP_MODULE (default rtloop.loop; a .py path runs as a script) is a CPU-test hook only:
 # tests/x280 put a stand-in there that records its command line, so no --mode rt loop ever runs in a test.
@@ -72,36 +75,9 @@ wait "$loop_pid"
 loop_rc=$?
 run=$(find "$runs" -mindepth 1 -maxdepth 1 -type d -name "*_t38" 2>/dev/null | sort | tail -n 1)
 [ -n "$run" ] || { job_log "the loop wrote no run dir (rc=$loop_rc)"; job_exit 2; }
-simpy - "$run" "$ev" "$CHIP_SESSION_DIR/x280d.attach.log" "$CHIP_SESSION_DIR/t38_summary.json" "$loop_rc" <<'EOF'
-import json, sys
-import numpy as np
-run, evf, attach_log, out, loop_rc = sys.argv[1:6]
-t = np.load(f"{run}/ticks.npy")
-ev = [json.loads(x) for x in open(evf) if x.strip()]
-eps = [json.loads(x) for x in open(f"{run}/episodes.jsonl") if x.strip()]
-fb = t["wbc_fb"].astype(bool)
-res = {"cases": {}, "fallback_ticks": int(fb.sum()), "safety_faults": int(sum(e.get("end") == "SAFETY_FAULT" for e in eps)),
-       "falls": int(sum(e.get("end") == "FALL" for e in eps)), "episodes": len(eps), "loop_rc": int(loop_rc)}
-for name in ("kill9_x280d", "park_start", "inject_crc"):
-    e = next((x for x in ev if x["event"] == name), None)
-    if e is None:
-        res["cases"][name] = {"ran": False}
-        continue
-    after = (t["t_start_ns"] >= e["mono_ns"]) & (t["t_start_ns"] < e["mono_ns"] + 20_000_000_000)
-    i = np.where(after & fb)[0]
-    first = int(t["k"][i[0]] - t["k"][after][0]) if i.size else None
-    # "within 1 tick": the first tick whose WBC call failed is served by ORT on that same call (fallback flag set),
-    # so the leg command never misses a tick; the gap between the event and that tick is how long the call took.
-    res["cases"][name] = {"ran": True, "fallback_ticks": int(i.size), "first_fallback_tick_after_event": first,
-                          "max_period_ms_after": float(np.max(np.diff(t["t_start_ns"][after])) / 1e6) if after.sum() > 1 else None}
-log = open(attach_log).read() if attach_log else ""
-res["attach_released"] = "L2CPU_RESET RMW" in log or "step 7:" in log
-res["attach_ok"] = "READY" in log and "attach:" in log
-ok_cases = all(c.get("ran") and c["fallback_ticks"] > 0 and (c["max_period_ms_after"] or 99) < 30 for c in res["cases"].values())
-res["pass"] = bool(ok_cases and not res["safety_faults"] and not res["falls"] and not res["attach_released"]
-                   and res["attach_ok"] and res["loop_rc"] == 0)
-json.dump(res, open(out, "w"), indent=1)
-print(json.dumps(res))
-sys.exit(0 if res["pass"] else 1)
-EOF
-job_exit $?
+simpy "$RT/x280/tools/m3_jobs.py" t38-summary "$run" "$ev" "$CHIP_SESSION_DIR/x280d.attach.log" \
+    "$CHIP_SESSION_DIR/t38_park.json" "$loop_rc" "$CHIP_SESSION_DIR/t38_summary.json"
+sum_rc=$?
+[ "$sum_rc" = 2 ] && job_exit 2
+job_log "T-3.8: loop rc=$loop_rc, summary rc=$sum_rc ($CHIP_SESSION_DIR/t38_summary.json, run $run)"
+job_exit $sum_rc

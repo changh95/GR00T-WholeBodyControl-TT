@@ -244,6 +244,62 @@ def test_attach_resumes_a_hart_left_in_the_park_stub(hold):
         s2.close()
 
 
+# REVIEW F10 (fixed 2026-10-25; T-3.8 case 2 on silicon, session s4): after E1F hart 0's L1I still held stage 0's
+#   GP-scratch line (stage 0's fence.i is followed by its `jr a0`, fetched again from that line; only the hart's own
+#   fence.i discards it, Caches.md:18-22), so the first RNMI after the park-stub swap ran stage 0: LIM zero-filled,
+#   every L1/L36 field 0, the tile lost until a chip reset. S2's parks passed only because e2's code LOAD + FENCE_I ran
+#   first; S4 had no code LOAD, and its first RNMI of the hold was T-3.8's PARK (the kill -9 / attach before it changed
+#   nothing on the hart). Fix: crt0 runs fence.i on hart 0's every entry, and E1F step E sends FENCE_I right after the
+#   swap (each alone drops the line; the second also orders the fence after the new code, as after a code LOAD).
+def test_first_rnmi_after_e1f_runs_the_park_stub_not_a_stale_stage0(monkeypatch, hold):
+    monkeypatch.setenv("X280_E1F_APPROVED", "1")  # sim only: the chip is a FakeDevice
+    s = D.Session("sim", ledger_path=hold)
+    try:
+        s.boot_stage0()
+        assert s.chip.hart(3).status()["l1i_gp"] is None, s.chip.status()  # stage 0's line dropped
+        r = s.park(3, hold_s=0.2)  # the first RNMI since the boot, no code LOAD in between (S4's order)
+        assert r["pass"] and r["n_reentry"] == (0, 1), (r, s.chip.status())
+        assert s.chip.peek(T3, regs.IMAGE_BASE, len(s.image)) == s.image  # LIM not zero-filled
+    finally:
+        s.close()
+    lines = [ln.split("/*")[0].strip() for ln in (FW / "crt0.S").read_text().splitlines()]
+    i = lines.index("bnez    t0, .Lother_hart")
+    assert lines[i - 2:i + 2] == ["_start:", "csrr    t0, mhartid", "bnez    t0, .Lother_hart", "fence.i"], lines[i - 2:i + 2]
+
+
+def test_e1f_step_e_fences_hart0_after_the_swap_without_crt0s_fence(monkeypatch, hold):
+    """F10's host half alone: the hart's L1I still holds stage 0 when the monitor is up (what the S4 image, whose crt0
+    had no fence.i, left there); step E's FENCE_I after the park-stub swap drops it, so the first RNMI parks."""
+    monkeypatch.setenv("X280_E1F_APPROVED", "1")  # sim only: the chip is a FakeDevice
+    stage0 = (FW / "build" / "stage0.bin").read_bytes()
+    order = []
+    wait_monitor, command = D.Session.wait_monitor, D.HostMailbox.command
+
+    def stale_after_crt0(self, t, *a, **kw):
+        r = wait_monitor(self, t, *a, **kw)
+        self.chip.hart(t).l1i_load(stage0)
+        order.append(("monitor up", self.chip.hart(t).status()["l1i_gp"]))
+        return r
+
+    def record(self, cmd, *a, **kw):
+        order.append((cmd, s.chip.peek(T3, regs.GP_SCRATCH, regs.GP_SCRATCH_SIZE) == s.park_stub))
+        return command(self, cmd, *a, **kw)
+
+    monkeypatch.setattr(D.Session, "wait_monitor", stale_after_crt0)
+    monkeypatch.setattr(D.HostMailbox, "command", record)
+    s = D.Session("sim", ledger_path=hold)
+    try:
+        s.boot_stage0()
+        # FENCE_I comes after the swap (the GP scratch already holds the park stub), before SELFTEST
+        assert order[:3] == [("monitor up", "stage0"), (D.ml.CMD["FENCE_I"], True), (D.ml.CMD["SELFTEST"], True)], order
+        assert s.chip.hart(3).status()["l1i_gp"] is None, s.chip.status()
+        r = s.park(3, hold_s=0.2)
+        assert r["pass"] and r["n_reentry"] == (0, 1), (r, s.chip.status())
+        assert s.chip.peek(T3, regs.IMAGE_BASE, len(s.image)) == s.image
+    finally:
+        s.close()
+
+
 # --- primary-source cross-checks (these pass) --------------------------------------------------------------------
 
 def test_reset_unit_pll_and_arc_constants_match_fw_and_kmd():

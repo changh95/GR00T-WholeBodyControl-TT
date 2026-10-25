@@ -1,10 +1,19 @@
 /* Entry of the X280 monitor image at 0x0800_0000 (PLAN.md WP-3.2).
  *
  * Every entry comes here: the cold one out of reset (reset handler address = 0x0800_0000, §5.2 boot
- * step 5) and every warm one through the GP-scratch park stub, which jumps to the hart's reset handler
- * address after an RNMI (park_stub.S). So this code must be correct on any number of entries:
+ * step 5) or from E1F's stage 0 (stage0.S), and every warm one through the GP-scratch park stub, which jumps
+ * to the fixed 0x0800_0000 after an RNMI (park_stub.S). So this code must be correct on any number of entries:
  *   - harts != 0 that come out of reset (mnstatus.NMIE = 1) park in wfi; one that arrives by RNMI (NMIE = 0: under
  *     `x280d serve --harts 4` its RNMI handler address is this _start) takes the secondary path below into mh.c;
+ *   - hart 0 runs fence.i first. Instruction fetch always goes through the hart's own L1I, the GP scratch
+ *     0x2001_0100 (the RNMI handler code) is one 64 B line there, and only the hart's own fence.i discards it
+ *     (Caches.md:18-22). After E1F, stage 0's fence.i is followed by its `jr a0`, fetched again from that line,
+ *     so the stage-0 line is back in L1I when we get here, and the host swaps the park stub into the scratch only
+ *     after the monitor is up. Without a fence.i the first RNMI runs stage 0 from the stale line: LIM zero-filled,
+ *     the hart spinning on the zeroed entry word, every L1/L36 field 0 (T-3.8 case 2 on silicon, 2026-10-25: that
+ *     image's .text fit in one 16 KiB way of the 2-way L1I, so no other line ever evicted it, through 75 min of
+ *     INFERs). x280d's E1F step E also sends FENCE_I right after the swap; this one covers every entry. On a warm
+ *     entry the park stub has already fenced; another fence.i costs nothing;
  *   - csrw 0x7c1, 0 clears the SiFive feature-disable chicken bits (L2CPUTile/README.md:49);
  *   - mstatus.FS and .VS = Initial (bits 14:13 and 10:9), MIE/MPRV off, mie = 0, fcsr = 0 (RNE);
  *   - .bss is cleared on every entry (.persist is not: monitor.c decides cold/warm from mnstatus.NMIE);
@@ -24,6 +33,7 @@
 _start:
     csrr    t0, mhartid
     bnez    t0, .Lother_hart
+    fence.i                          /* drop a GP-scratch line (stage 0 after E1F) from this hart's L1I */
 #if !defined(SPIKE_HOST)
     csrwi   0x7c1, 0
 #endif

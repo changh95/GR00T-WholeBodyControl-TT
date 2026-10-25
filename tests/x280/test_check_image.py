@@ -48,7 +48,8 @@ def test_real_image_passes(built):
     assert "PASS crc32_tab" in out, out
     # harts 1-3: the fixed RNMI exception spin, the NOLOAD .mh region, the bench payload's placement, no AMO anywhere
     for needle in ("PASS mh_layout: mh_sec_rnmi_exc 0x8000200 = ['0x10500073', '0xffdff06f'], .mh [0x800a000, 0x800c000)",
-                   "PASS mh_bench: entry 0x81df400", "PASS amo[monitor.elf]", "PASS amo[mh_bench.elf]"):
+                   "PASS mh_bench: entry 0x81df400", "PASS amo[monitor.elf]", "PASS amo[mh_bench.elf]",
+                   "PASS hart0_fence_i: fence.i before hart 0's first call"):
         assert needle in out, (needle, out)
 
 
@@ -112,9 +113,23 @@ def test_broken_images_fail(built, tmp_path):
     assert code == 1, out
     for needle in ("FAIL image_size", "FAIL csr_smrnmi[monitor.elf]", "FAIL mnret[monitor.elf]",
                    "FAIL rnmi_rearm", "FAIL undefined[monitor.elf]: not_defined", "FAIL park_stub",
-                   "FAIL sections_lim", "FAIL mh_layout", "FAIL amo[monitor.elf]"):
+                   "FAIL sections_lim", "FAIL mh_layout", "FAIL amo[monitor.elf]", "FAIL hart0_fence_i"):
         assert needle in out, (needle, out)
     assert "PASS stage0" in out
+
+
+def test_hart0_fence_i_rule(built, tmp_path):
+    """hart0_fence_i: a fence.i between _start and hart 0's first call passes; none, or one only after that call, fails
+    (T-3.8 case 2 on silicon, 2026-10-25: the image without it let the first RNMI after E1F run a stale stage 0)."""
+    m = _mod()
+    e = m.Elf(built / "monitor.elf")
+    fenced, call = m.fence_i_before_first_call(e, e.sym("_start"))
+    assert fenced and call is not None and m.word_at(e, e.sym("_start") + 8) == m.FENCE_I  # right after the branch
+    head = ".text\n.globl _start\n_start:\n    csrr t0, mhartid\n    bnez t0, 2f\n"
+    for name, body, want in (("good", "    fence.i\n    call f\n", True), ("none", "    call f\n", False),
+                             ("late", "    call f\n    fence.i\n", False)):
+        elf = _link(tmp_path, name, head + body + "2:  j 2b\nf:  ret\n", ["-Ttext=0x08000000", "-e", "_start"])
+        assert m.fence_i_before_first_call(m.Elf(elf), 0x0800_0000)[0] is want, name
 
 
 def test_mnret_mnemonic_in_source_is_caught(tmp_path):

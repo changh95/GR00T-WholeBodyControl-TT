@@ -1064,7 +1064,10 @@ def test_e0_peek_cross_check_against_a_fake_server_g1(daemon, tmp_path):
 def test_e1f_boot_then_rnmi_park_returns_to_crt0(monkeypatch, hold):
     """F1: E1F leaves the reset vectors at the stage-0 stub (consumed only at reset, ISA README.md:46); the park stub
     now jumps to crt0 at the fixed 0x0800_0000 (park_stub.S), so a PARK after an E1F boot re-enters the monitor
-    (spike shows the same with SPIKE_E1F_VECTORS, test_spike.py)."""
+    (spike shows the same with SPIKE_E1F_VECTORS, test_spike.py). F10: the first PARK comes straight after the boot,
+    with no code LOAD in between: it runs the park stub only because hart 0 fenced after E1F (crt0's entry fence.i,
+    step E's FENCE_I), dropping stage 0's line from its L1I (the sim models that line; spike's per-instruction cache
+    does not)."""
     monkeypatch.setenv("X280_E1F_APPROVED", "1")  # sim only: the chip is a FakeDevice
     s = D.Session("sim", ledger_path=hold)
     try:
@@ -1111,6 +1114,116 @@ def test_stage0_boot_then_attach_and_park_without_a_release(monkeypatch, hold):
         assert s2.check_parity()["pass"]
     finally:
         s2.close()
+
+
+def _serve_in_thread(sess):
+    import threading
+    port = _free_port()
+    srv = D.Server(sess, port)
+    th = threading.Thread(target=srv.run, daemon=True)
+    th.start()
+    return srv, th, f"tcp://127.0.0.1:{port}"
+
+
+def _calls(url: str, n: int, tick0: int) -> dict:
+    """n W-WBC calls; an unpinned sim hart may miss the 4 ms INFER deadline now and then on a loaded host."""
+    ctx = zmq.Context.instance()
+    sock = ctx.socket(zmq.REQ)
+    sock.setsockopt(zmq.LINGER, 0)
+    sock.connect(url)
+    rng, out = np.random.default_rng(tick0), {"ok": 0, "errors": []}
+    try:
+        for i in range(n):
+            obs = rng.standard_normal((1, 516)).astype(np.float32)
+            sock.send(wire.request("gear_wbc_action", {"policy": (BAL, WALK)[i & 1], "obs": obs, "tick": tick0 + i,
+                                                       "seq": tick0 + i}))
+            assert sock.poll(5000)
+            rep = wire.loads(sock.recv())
+            if "error" in rep:
+                out["errors"].append(rep["error"])
+            else:
+                out["ok"] += 1
+    finally:
+        sock.close(0)
+    return out
+
+
+def test_t38_kill9_attach_then_park_hold_after_a_stage0_boot(monkeypatch, hold):
+    """T-3.8 cases 1 and 2 as they ran on silicon (s4, 2026-10-25), in one process (the sim chip lives in its x280d
+    process): serve --stage0, blob, calls; kill -9 (the keeper fd closes, the KMD's cleanup writes 'GONE', the monitor
+    idles); serve --attach (blob reload, parity, calls); `x280d park --via URL --hold-s 2` through its admin endpoint.
+    On silicon the RNMI ran stage 0 from the line hart 0's L1I still held at 0x2001_0100 (no fence.i on hart 0 since
+    E1F): LIM zero-filled, every L1/L36 field 0, every call stalled. crt0's fence.i on entry and step E's FENCE_I after
+    the swap drop that line, so the RNMI runs the park stub, the hart re-enters warm and serves again."""
+    monkeypatch.setenv("X280_E1F_APPROVED", "1")  # sim only: the chip is a FakeDevice
+    s1 = D.Session("sim", ledger_path=hold)
+    s1.boot_stage0()
+    chip = s1.chip
+    assert chip.hart(3).status()["l1i_gp"] is None  # crt0 dropped stage 0's line before the host swapped the stub in
+    with s1.batch(3):
+        s1.load_blob(3)
+    srv1, th1, url1 = _serve_in_thread(s1)
+    try:
+        assert _calls(url1, 50, 0)["ok"] >= 48
+    finally:
+        srv1.stop = True
+        th1.join(5)
+        srv1.close()
+    s1.close(keep_chip=True)  # kill -9: the keeper fd closes, 'GONE' lands in L38
+    t0 = time.monotonic()
+    while chip.peek32(regs.L2CPU_XY[3], ml.ADDR["L1"] + ml.OFFSETS["l1.state"]) != ml.STATE["HOST_GONE"]:
+        assert time.monotonic() - t0 < 2.0
+        time.sleep(0.002)
+    monkeypatch.delenv("X280_E1F_APPROVED")
+    s2 = D.Session("sim", ledger_path=hold, chip=chip)
+    srv2 = None
+    try:
+        assert s2.attach()["tiles"]["3"]["state"] == ml.STATE["HOST_GONE"]
+        with s2.batch(3):
+            s2.load_blob(3)
+        assert s2.check_parity()["pass"]
+        srv2, th2, url2 = _serve_in_thread(s2)
+        assert _calls(url2, 50, 1000)["ok"] >= 48
+        p = D._admin_call(url2, "park", 30.0, tile=3, hold_s=2.0)
+        assert p["pass"] and p["n_reentry"] == [0, 1] and p["state"] == ml.STATE["REENTERED"], (p, chip.status())
+        assert p["mncause"] == (1 << 63) | 2 and "stage0_words" not in p
+        assert chip.peek(regs.L2CPU_XY[3], regs.IMAGE_BASE, len(s2.image)) == s2.image  # LIM kept
+        r = _calls(url2, 20, 2000)
+        assert r["ok"] >= 18 and not [e for e in r["errors"] if "stalled" in e], r  # silicon: every call stalled
+        st = chip.hart(3).status()
+        assert (st["boots"], st["rnmis"], st["reentries"], st["l1i_gp"]) == (1, 1, 1, None)  # crt0 fenced again
+        assert not [e for _, e in chip.hart(3).events if "stage 0" in e and "RNMI" in e]
+    finally:
+        if srv2 is not None:
+            srv2.stop = True
+            th2.join(5)
+            srv2.close()
+        s2.close()
+
+
+def test_a_stale_stage0_line_reruns_stage0_and_park_names_it(monkeypatch, hold):
+    """What T-3.8 case 2 looked like on silicon, reproduced with stage 0 put back into the sim hart's L1I (as a crt0
+    without its entry fence.i left it): the RNMI runs stage 0, so LIM is zero-filled (L1 and L36 read 0: fw_magic,
+    state, heartbeat, seq_done, n_reentry, build_id), the done word 0x081E_0000 is written again and the entry word
+    is 0; PARK fails and says so."""
+    monkeypatch.setenv("X280_E1F_APPROVED", "1")  # sim only: the chip is a FakeDevice
+    s = D.Session("sim", ledger_path=hold)
+    try:
+        s.boot_stage0()
+        with s.batch(3):
+            s.load_blob(3)
+        hart = s.chip.hart(3)
+        hart.l1i_load((FW / "build" / "stage0.bin").read_bytes())
+        assert hart.status()["l1i_gp"] == "stage0 (stale)"
+        p = s.park(3)
+        assert not p["pass"] and p["n_reentry"] == (0, 0) and (p["state"], p["mncause"], p["mnepc"], p["seq"]) == (0, 0, 0, 0)
+        assert p["stage0_words"] == {"done": regs.LIM_END, "entry": 0} and "ran stage 0" in p["why"], p
+        with s.batch(3):
+            l1, l36 = s.mb[3].l1(), s.mb[3].l36()
+        assert not any(l1.values()) and not any(l36.values()), (l1, l36)
+        assert hart.state == "stage0" and "stale GP-scratch line" in hart.events[-1][1]
+    finally:
+        s.close()
 
 
 def test_powertest_watch_ends_with_a_pll4_read(hold):

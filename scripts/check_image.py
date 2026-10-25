@@ -15,6 +15,8 @@ Checks (each prints PASS/FAIL; exit 1 on any FAIL):
   mnret           every mnret-pattern word is exactly 0x70200073 (RNMIs.md:31) and no source file uses
                   the `mnret` mnemonic (assemblers disagree on it)
   rnmi_rearm      the X280 image contains csrsi 0x353, 8 (0x35346073) and csrwi 0x7c1, 0 (0x7c105073)
+  hart0_fence_i   crt0 runs fence.i (0x0000100F) between _start and hart 0's first call (mon_entry): after E1F hart 0's
+                  L1I still holds stage 0's GP-scratch line until its own fence.i (Caches.md:18-22; crt0.S)
   priv_insns      only ecall/ebreak/wfi/mret/mnret among SYSTEM funct3=0 words
   crc32_tab       mon_crc32's slicing-by-8 tables (mon_crc32_tab, x280/fw/crc32_tab.h): in .rodata, 64 B aligned,
                   8 KiB, every entry equal to its zlib definition (INFO when the image was built -DMON_CRC_BITWISE)
@@ -57,6 +59,7 @@ SMRNMI_CSRS = range(0x740, 0x745)
 MNRET = 0x70200073
 REARM = 0x35346073                                 # csrrsi x0, 0x353, 8
 CHICKEN = 0x7C105073                               # csrrwi x0, 0x7c1, 0
+FENCE_I = 0x0000100F                               # fence.i
 PRIV_OK = {0x00000073: "ecall", 0x00100073: "ebreak", 0x10500073: "wfi", 0x30200073: "mret", MNRET: "mnret"}
 
 SHF_ALLOC, SHF_EXECINSTR = 0x2, 0x4
@@ -180,6 +183,21 @@ def words(elf: Elf):
 def amo_words(elf: Elf):
     """(address, word) of every A-extension instruction: major opcode 0x2F (LR, SC, AMO*, and the vector AMOs)."""
     return [(addr, w) for addr, w, n in elf.instructions() if n == 4 and (w & 0x7F) == 0x2F]
+
+
+def fence_i_before_first_call(elf: Elf, start: int):
+    """(a fence.i came before the first call, the address of that call) walking the instructions from `start`; a call is
+    jal / jalr with rd = ra, or c.jalr."""
+    seen = False
+    for addr, w, n in elf.instructions():
+        if addr < start:
+            continue
+        if n == 4 and w == FENCE_I:
+            seen = True
+        if (n == 4 and (w & 0x7F) in (0x6F, 0x67) and (w >> 7) & 0x1F == 1) or \
+                (n == 2 and (w & 0xF07F) == 0x9002 and (w >> 7) & 0x1F):
+            return seen, addr
+    return seen, None
 
 
 def word_at(elf: Elf, addr: int):
@@ -346,6 +364,12 @@ def main(argv=None) -> int:
         rep.check("rnmi_rearm", REARM in mw and CHICKEN in mw,
                   f"csrsi 0x353, 8 {'present' if REARM in mw else 'MISSING'}; "
                   f"csrwi 0x7c1, 0 {'present' if CHICKEN in mw else 'MISSING'}")
+
+    fenced, call = fence_i_before_first_call(mon, start if start is not None else LIM_BASE)
+    rep.check("hart0_fence_i", fenced and call is not None,
+              f"fence.i before hart 0's first call at {call and hex(call)}" if fenced and call is not None else
+              f"no fence.i between _start and hart 0's first call ({call and hex(call)}): after E1F the first RNMI "
+              "would run stage 0 from hart 0's stale L1I line")
 
     for e in all_elfs:
         am = amo_words(e)

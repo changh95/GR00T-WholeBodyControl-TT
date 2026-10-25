@@ -528,6 +528,23 @@ def test_trap_in_payload_is_dumped_and_monitor_survives(hart):
     assert (l1["mcause"], l1["mepc"], l1["mtval"]) == (1, PAY + 128, PAY + 128)
 
 
+def test_every_entry_fences_hart0_l1i_first(libs):
+    """crt0 runs fence.i on hart 0 before anything else, on every entry (crt0.S): after E1F, hart 0's L1I still holds
+    stage 0's GP-scratch line, and the first RNMI would run stage 0 from it (T-3.8 case 2 on silicon, 2026-10-25).
+    The x86 build counts hart 0's fence.i (what mailbox_sim's L1I model reads): one per cold or warm entry, one per
+    FENCE_I."""
+    h = Hart(libs["main"], boot=False)
+    assert h.stats().fence_i == 0
+    assert h.lib.mon_x86_boot() == X86_RUNNING
+    assert h.stats().fence_i == 1                                   # the cold entry, before any command
+    seq = h.issue(ml.CMD["PARK"])
+    assert h.run(seq) == X86_PARKED and h.stats().fence_i == 1
+    assert h.lib.mon_x86_reenter((1 << 63) | 2, 0x08000123) == X86_RUNNING
+    assert h.stats().fence_i == 2 and h.l36()["n_reentry"] == 1     # the warm entry
+    h.cmd(ml.CMD["FENCE_I"])
+    assert h.stats().fence_i == 3
+
+
 def test_hang_park_reentry_rearm_10_of_10(hart):
     """T-3.E2's RNMI re-arm sequence, host-side: hung payload -> RNMI park -> warm entry -> CALL again."""
     hart.code(PAY)
@@ -966,6 +983,17 @@ def test_mh_bench_refusals_on_x86(mhb):
     assert _mhb(mhb, 13, 0xF)["sm"]["status"] == S_["EKERNEL"]
     coll = _mhb(mhb, 1, 0, mode=ml.MHB_MODE["COLLECT"])
     assert coll["sm"]["status"] == S_["ENOJOB"]
+
+
+def test_mh_secondary_fence_i_is_not_hart0s(mhb):
+    """A secondary fences its own L1I before a LOADed job (mh.c run_job, counted in its aux line); hart 0's count, the
+    one mailbox_sim's model of hart 0's L1I reads, does not move."""
+    f0 = mhb.stats().fence_i
+    ax0 = {i: _mh(mhb)["aux"][i]["fence_i"] for i in (1, 2, 3)}
+    r = _mhb(mhb, 1, 0xE)
+    assert (r["sm"]["status"], r["sm"]["done"]) == (0, 0xE)
+    assert {i: _mh(mhb)["aux"][i]["fence_i"] for i in (1, 2, 3)} == {i: ax0[i] + 1 for i in (1, 2, 3)}
+    assert mhb.stats().fence_i == f0
 
 
 def test_mh_bench_background_and_collect_on_x86(mhb):

@@ -111,7 +111,9 @@ void plat_rnmi_rearm(void)
     fk.mnstatus |= 8u;
     st.rearm++;
 }
-void plat_fence_i(void) { __atomic_add_fetch(&st.fence_i, 1, __ATOMIC_RELAXED); }
+/* st.fence_i counts hart 0's fence.i (mailbox_sim.py's model of its L1I GP-scratch line reads it); a secondary's own
+ * (mh.c payload jobs) is in its mh_aux line. */
+void plat_fence_i(void) { if (!tl_hart) __atomic_add_fetch(&st.fence_i, 1, __ATOMIC_RELAXED); }
 
 /* multi-hart primitives (plat.h): fake CLINT msip/mtimecmp per hart, the calling hart's mip, a secondary's wfi */
 void plat_msip_set(uint32_t h, uint32_t v) { if (h < MH_NHARTS) sec[h].msip = v; }
@@ -324,6 +326,7 @@ X86_EXPORT uint64_t mon_x86_mnstatus(void) { return fk.mnstatus; }
 
 static int enter(void)
 {
+    plat_fence_i();                  /* crt0: hart 0's fence.i on every entry */
     memset(&g_rt, 0, sizeof g_rt);   /* crt0 clears .bss on every entry */
     mon_entry();
     plat_rnmi_rearm();               /* crt0: csrsi 0x353, 8 */

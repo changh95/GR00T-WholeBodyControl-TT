@@ -716,7 +716,7 @@ class Session:
         spends the release, and it runs only with X280_E1F_APPROVED=1 (the user's DP3(d) approval).
         Order: interlocks; GP scratch = stage0.bin; reset vectors -> the stub, RNMI handler -> the stub entry (a
         re-run only re-zeroes LIM); PLL4 200 -> release -> 800; wait for the done word; only then any LIM write:
-        image, entry word; monitor up; GP scratch = the park stub; SELFTEST."""
+        image, entry word; monitor up; GP scratch = the park stub; FENCE_I (hart 0's L1I drops stage 0); SELFTEST."""
         if os.environ.get("X280_E1F_APPROVED") != "1":
             raise X280Error("E1F stage-0 needs the user's explicit DP3(d) approval: X280_E1F_APPROVED=1")
         if self.harts == regs.MH_HARTS and os.environ.get(MH_APPROVED_ENV) != "1":
@@ -778,12 +778,17 @@ class Session:
                 self.k.stage0_enter(t, regs.RESET_PC)
         # The reset vectors keep pointing at 0x2001_0100: they are consumed only at reset (ISA README.md:46), and the
         # park stub jumps to crt0 at the fixed 0x0800_0000 (park_stub.S, lim.ld:63), not through them (review F1).
-        self.mark("E1F step E: monitor up; GP scratch = the park stub; SELFTEST")
+        # The swap rewrites code hart 0 has run: stage 0's line stays in its L1I (stage0.S refetches it after its own
+        # fence.i) until the hart itself runs fence.i, which no host write can replace (Caches.md:22). crt0 runs one on
+        # entry, and the FENCE_I after the swap orders one after it, as after every code LOAD; without either the first
+        # RNMI ran stage 0 again on silicon (review F10, T-3.8 s4).
+        self.mark("E1F step E: monitor up; GP scratch = the park stub; FENCE_I; SELFTEST")
         for t in self.tiles:
             try:
                 with self.batch(t):
                     out["tiles"][str(t)] = {"monitor": self.wait_monitor(t)}
                     self.k.write_gp_scratch(t, self.park_stub)
+                    self.mb[t].command(ml.CMD["FENCE_I"])
                     out["tiles"][str(t)]["selftest"] = self.selftest(t)
             except (X280Error, K.KmdError) as e:
                 self.ledger.mark_burned(t)
@@ -1724,13 +1729,22 @@ class Session:
             # warm entry: L1 shows REENTERED (or HOST_GONE), mcause = mncause, and seq_req was adopted, not re-run
             ok = (l36["n_reentry"] == n0 + 1 and l1["fw_magic"] == ml.MAGIC and l1["seq_done"] == seq_req
                   and l1["state"] in (ml.STATE["REENTERED"], ml.STATE["HOST_GONE"]))
+            r = {"pass": bool(ok), "n_reentry": (n0, l36["n_reentry"]), "state": l1["state"],
+                 "mncause": l1["mcause"], "mnepc": l1["mepc"], "silence_after_s": round(t_change - t0, 6),
+                 "resume_s": round(time.perf_counter() - t1, 6), "seq": mb.seq}
+            if not ok:  # stage 0 run by the RNMI zero-fills LIM, rewrites its done word and spins on the zeroed entry word
+                done, entry = k.read_lim32(STAGE0_DONE_WORD, t), k.read_lim32(STAGE0_ENTRY_WORD, t)
+                r["stage0_words"] = {"done": done, "entry": entry}
+                if l1["fw_magic"] == 0 and done == regs.LIM_END and entry == 0:
+                    r["why"] = ("the RNMI ran stage 0: LIM zero-filled (L1/L36 all 0), its done word written again, the "
+                                "hart spinning on the zeroed entry word; hart 0's L1I still held the stage-0 line at "
+                                "0x2001_0100 (no fence.i on hart 0 since E1F: crt0.S, boot_stage0 step E); the tile is "
+                                "lost until a chip reset")
             try:
                 self.ledger.mark_resumed(t)
             except ledger_mod.LedgerError as e:
                 log(f"ledger: {e}")
-        return {"pass": bool(ok), "n_reentry": (n0, l36["n_reentry"]), "state": l1["state"],
-                "mncause": l1["mcause"], "mnepc": l1["mepc"], "silence_after_s": round(t_change - t0, 6),
-                "resume_s": round(time.perf_counter() - t1, 6), "seq": mb.seq}
+        return r
 
     def e2(self, t: int, n: int = 10) -> dict:
         """T-3.E2 host part: LOAD+CALL of the checksum payload n times, then the RNMI re-arm loop n times."""

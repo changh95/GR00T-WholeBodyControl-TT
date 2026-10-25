@@ -852,3 +852,89 @@ def test_t39_summary_rows(tmp_path):
                         str(after), "95", "165", "0", str(out), str(good)], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and json.loads(out.read_text())["swap_da"]["applicable"] is False, r.stdout + r.stderr
     assert json.loads(out.read_text())["pass"]
+
+
+# --- T-3.8 (jobs/m3_faults.sh's summary, m3_jobs.py t38-summary) -----------------------------------------------------
+
+S4_SILICON = RT / "runs/sessions/20261025_122238_3405074_s4"  # T-3.8 on silicon: case 2's PARK ran a stale stage 0
+T38_T0 = 1_000_000_000_000
+
+
+def _t38(tmp_path, fb_spans=((300, 465), (2406, 2506), (3600, 3601)), n=4500, slow=(), park_ok=True,
+         attach="x280d[1] 12:00:00 attach: {}\nx280d[1] 12:00:01 READY on tcp://127.0.0.1:9\n", name="t38"):
+    """A T-3.8 run: 20 ms ticks, episodes of 1440 ticks with a 4.3 s env reset between them, the three cases at ticks
+    300 (kill -9 + attach: 3.3 s of fallbacks), 2400 (PARK, 2 s hold, its 20 s window across an episode end) and 3600
+    (one CRC fault), fallbacks at fb_spans; slow = ticks whose period is 40 ms."""
+    from rtloop.schema import TICK_DTYPE
+    d = tmp_path / name
+    run = d / "run"
+    run.mkdir(parents=True)
+    t = np.zeros(n, TICK_DTYPE)
+    i = np.arange(n)
+    t["ep"], t["k"] = np.divmod(i, 1440)
+    t["t_start_ns"] = T38_T0 + i * 20_000_000 + t["ep"].astype(np.int64) * 4_300_000_000  # ep is uint32 (numpy 2)
+    for j in slow:
+        t["t_start_ns"][j:] += 20_000_000
+    for a, b in fb_spans:
+        t["wbc_fb"][a:b] = 1
+    np.save(run / "ticks.npy", t)
+    (run / "episodes.jsonl").write_text("".join(json.dumps({"ep": e, "end": "TRUNC"}) + "\n" for e in range(4)))
+    ev = d / "t38_events.jsonl"
+    ev.write_text("".join(json.dumps({"event": e, "mono_ns": int(t["t_start_ns"][k]) - 1_000_000}) + "\n"
+                          for e, k in (("kill9_x280d", 300), ("attach_ready", 470), ("park_start", 2400),
+                                       ("inject_crc", 3600))))
+    (d / "x280d.attach.log").write_text(attach)
+    (d / "t38_park.json").write_text(json.dumps({"pass": park_ok, "n_reentry": [0, 1 if park_ok else 0],
+                                                 "state": 4 if park_ok else 0, "resume_s": 0.02}))
+    return run, ev, d / "x280d.attach.log", d / "t38_park.json"
+
+
+def test_t38_summary_cases_period_inside_episodes_and_the_park(tmp_path):
+    """Each case falls back, keeps the tick period < 30 ms between ticks of one episode (S4's every case 'failed' on
+    the 4.3 s env reset between episodes, which is not a WBC period) and has the X280 serving again; the PARK step
+    passed; the attach did not release."""
+    run, ev, att, park = _t38(tmp_path)
+    s = M.t38_summary(run, ev, att, park, 0)
+    assert s["pass"], s
+    c = s["cases"]
+    assert c["park_start"]["episode_ends_in_window"] == 1 and c["park_start"]["max_period_ms_after"] == pytest.approx(20.0)
+    assert [c[k]["fallback_ticks"] for k in M.T38_CASES] == [165, 100, 1]
+    assert [c[k]["first_fallback_tick_after_event"] for k in M.T38_CASES] == [0, 6, 0]
+    assert all(c[k]["served_after_fallback"] > 0 for k in M.T38_CASES) and s["park"]["pass"] is True
+    # S4's case 2: the PARK failed and the X280 never served again -> fail, even with every period fine
+    run, ev, att, park = _t38(tmp_path, fb_spans=((300, 465), (2406, 4500)), park_ok=False, name="s4like")
+    s = M.t38_summary(run, ev, att, park, 0)
+    assert not s["pass"] and s["park"]["pass"] is False and s["cases"]["park_start"]["served_after_fallback"] == 0
+    assert s["cases"]["park_start"]["max_period_ms_after"] == pytest.approx(20.0)
+    run, ev, att, park = _t38(tmp_path, slow=(3700,), name="slow")
+    s = M.t38_summary(run, ev, att, park, 0)
+    assert not s["pass"] and s["cases"]["inject_crc"]["max_period_ms_after"] == pytest.approx(40.0)
+    run, ev, att, park = _t38(tmp_path, name="rel", attach="attach: {}\nstep 7: the session's one L2CPU_RESET RMW\nREADY\n")
+    assert M.t38_summary(run, ev, att, park, 0)["attach_released"]
+    run, ev, att, park = _t38(tmp_path, fb_spans=((300, 465), (2406, 2506)), name="nocrc")
+    assert not M.t38_summary(run, ev, att, park, 0)["pass"]  # case 3 without a fallback
+    out = tmp_path / "t38.json"
+    run, ev, att, park = _t38(tmp_path, name="cli")
+    r = subprocess.run([sys.executable, str(M3J), "t38-summary", str(run), str(ev), str(att), str(park), "0", str(out)],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and json.loads(out.read_text())["pass"], r.stdout + r.stderr
+    r = subprocess.run([sys.executable, str(M3J), "t38-summary", str(run), str(ev), str(att), str(park), "1", str(out)],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 1 and not json.loads(out.read_text())["pass"]
+
+
+def test_t38_summary_of_the_s4_silicon_session():
+    """S4 (2026-10-25): within each episode every case kept its tick period < 30 ms (22.4, 21.8, 28.6 ms; the 4.3 s
+    maxima were env resets), the kill -9 and CRC cases recovered, and case 2 failed: its PARK ran a stale stage 0
+    (t38_park.json state 0, n_reentry [0, 0]) and the X280 never served again."""
+    run = next(iter(sorted((S4_SILICON / "runs_t38").glob("*_t38"))), None) if S4_SILICON.exists() else None
+    if run is None:
+        pytest.skip(f"{S4_SILICON} not on this machine")
+    s = M.t38_summary(run, S4_SILICON / "t38_events.jsonl", S4_SILICON / "x280d.attach.log",
+                      S4_SILICON / "t38_park.json", 0)
+    c = s["cases"]
+    assert [round(c[k]["max_period_ms_after"], 1) for k in M.T38_CASES] == [22.4, 21.8, 28.6]
+    assert all(c[k]["episode_ends_in_window"] == 1 for k in M.T38_CASES)
+    assert c["kill9_x280d"]["served_after_fallback"] > 0 and c["inject_crc"]["fallback_ticks"] > 0
+    assert c["park_start"]["served_after_fallback"] == 0 and s["park"]["pass"] is False and s["park"]["state"] == 0
+    assert s["attach_ok"] and not s["attach_released"] and not s["pass"]

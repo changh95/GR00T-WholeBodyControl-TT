@@ -12,6 +12,8 @@
  *     not, because an E1F boot leaves that address at the stage-0 stub 0x2001_0100 = this stub, where the
  *     hart would loop with NMIE = 0 forever (review F1), and the ISA only defines the address as the pc taken
  *     out of reset (README.md:46). The spin gives the host time to replace code before the hart runs again.
+ *     An RNMI runs this stub only if it is what the hart's L1I holds at 0x2001_0100: after E1F that line is
+ *     stage 0 until a fence.i of hart 0 drops it (crt0's on entry; the FENCE_I x280d sends after the swap).
  * +48 spin (16 B): the RNMI exception handler. An exception inside the park stub is unrecoverable
  *     (NMIE = 0), so the hart waits in wfi; the host sees it in the wfi status bits (0x2001_0400,
  *     MemoryMap.md:115).

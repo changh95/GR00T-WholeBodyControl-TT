@@ -14,11 +14,15 @@ What the chip side emulates, with the primary source of each behaviour:
   handler / exception handler = GP-scratch park stub / spin stub (RNMIs.md:48-59), GP scratch = the park
   stub, LIM image = monitor.bin. A mismatch leaves the hart "dead" (no heartbeat), as garbage would.
 - RNMI: bit h of the trigger word 0x2001_0414 is level-triggered and taken only while mnstatus.NMIE = 1
-  (RNMIs.md:15-22); the hart then runs the code in the GP scratch (its RNMI handler address, RNMIs.md:48-59).
-  The park stub spins while the bit stays set and jumps to crt0 at the fixed 0x0800_0000 when it clears
-  (park_stub.S), i.e. a warm entry (mon_x86_reenter, mncause = 2^63 | 2, RNMIs.md:76-77); stage0.bin there (E1F,
-  before the host swapped in the park stub) re-zeroes LIM; anything else leaves the hart dead. A lost RNMI
-  (NMIE = 0) leaves the hart where it was.
+  (RNMIs.md:15-22); the hart then runs the code at its RNMI handler address 0x2001_0100 (RNMIs.md:48-59) as its
+  L1I holds it: instruction fetch always goes through L1I, the GP scratch is one 64 B line there, and only the
+  hart's own fence.i discards it (Caches.md:18-22). So hart 0 keeps the line it last fetched from the GP scratch
+  (stage 0 after an E1F boot: stage 0's fence.i is followed by its `jr a0`, fetched again from that line) until it
+  executes fence.i (counted by the x86 build: crt0's on every entry, FENCE_I), and fetches the GP scratch afresh
+  after one. The park stub spins while the bit stays set and jumps to crt0 at the fixed 0x0800_0000 when it clears
+  (park_stub.S), i.e. a warm entry (mon_x86_reenter, mncause = 2^63 | 2, RNMIs.md:76-77); stage 0 there (E1F
+  before the swap, or a stale stage-0 line after it) re-zeroes LIM at once and spins on the zeroed entry word;
+  anything else leaves the hart dead. A lost RNMI (NMIE = 0) leaves the hart where it was.
 - KMD cleanup: FakeDevice already performs the registered SET_NOC_CLEANUP write when the keeper fd is
   released (chardev.c:1092-1115), so the monitor sees 'GONE' in L38 and idles.
 - CMFW telemetry: TIMER_HEARTBEAT advances at 10 Hz (fw telemetry.c:278, 549), so x280d's epoch and E0
@@ -84,7 +88,7 @@ def _lib_signatures(lib: ctypes.CDLL) -> ctypes.CDLL:
         ("mon_x86_secondary_start", i32, [u32, u64, u64]), ("mon_x86_secondary_stop", None, [u32]),
         ("mon_x86_secondary_stop_all", None, []), ("mon_x86_secondary_running", i32, [u32]),
         ("mon_x86_secondary_mnstatus", u64, [u32]), ("mon_x86_secondary_hang", None, [u32, i32]),
-        ("mon_x86_set_beu_hart", None, [u32, u32]),
+        ("mon_x86_set_beu_hart", None, [u32, u32]), ("mon_x86_stats", None, [vp]),
     ):
         f = getattr(lib, name)
         f.restype, f.argtypes = res, args
@@ -104,6 +108,12 @@ def load_private_lib(path: Path = LIB, tag: str = "hart") -> ctypes.CDLL:
     finally:
         os.close(fd)  # the mapping keeps the image alive
     return _lib_signatures(lib)
+
+
+class X86Stats(ctypes.Structure):
+    """plat_x86.c struct x86_stats (mon_x86_stats); fence_i counts hart 0's fence.i."""
+    _fields_ = [(n, ctypes.c_uint64) for n in
+                ("fence_i", "rearm", "mtime_reads", "calls", "parks", "hangs", "traps_emulated", "restarts")]
 
 
 def known_payloads(build: Path = FW_BUILD) -> dict:
@@ -145,6 +155,10 @@ class SimHart:
         self._payloads = known_payloads(Path(lib_path).resolve().parents[1])
         st0 = Path(lib_path).resolve().parents[1] / "stage0.bin"
         self.stage0 = st0.read_bytes() if st0.exists() else None
+        # hart 0's L1I copy of the GP-scratch line (None: not cached) and its fence.i count when it was filled: the
+        # code an RNMI runs while no fence.i has dropped it since (Caches.md:18-22; see the module docstring)
+        self.l1i_gp: Optional[bytes] = None
+        self._l1i_fence = 0
         # harts 1-3: reset | cold (crt0 wfi, method A) | cold_e1f (stage 0's wfi) | rnmi (spinning on the trigger bit in
         # crt0's secondary path) | running (mh_secondary_main thread) | stranded | dead
         self.sec = {h: {"state": "reset", "why": "", "rnmis": 0, "lost": 0, "starts": 0, "mnepc": 0}
@@ -183,6 +197,32 @@ class SimHart:
         self.events.append((time.monotonic(), what))
         del self.events[:-200]
 
+    # -- hart 0's L1I line of the GP scratch (0x2001_0100, one 64 B line, Caches.md:18-22) --
+    def _fence_count(self) -> int:
+        s = X86Stats()
+        self.lib.mon_x86_stats(ctypes.byref(s))
+        return s.fence_i
+
+    def _l1i_fill(self) -> bytes:
+        """Hart 0 fetches from the GP scratch: the line goes into its L1I as the scratch holds it now."""
+        self.l1i_gp = bytes(self.chip.peek(self.xy, regs.GP_SCRATCH, regs.GP_SCRATCH_SIZE))
+        self._l1i_fence = self._fence_count()
+        return self.l1i_gp
+
+    def _rnmi_code(self) -> bytes:
+        """What hart 0 runs at its RNMI handler address 0x2001_0100: the L1I line while no fence.i of this hart has
+        dropped it since it was filled, else a fresh fetch of the GP scratch (which fills the line again)."""
+        if self.l1i_gp is not None and self._fence_count() == self._l1i_fence:
+            return self.l1i_gp
+        return self._l1i_fill()
+
+    def _l1i_name(self) -> Optional[str]:
+        code = self.l1i_gp
+        if code is None or self._fence_count() != self._l1i_fence:
+            return None
+        return ("stage0" if code == self.stage0 else "park_stub" if code == self.park_stub else "other") + \
+            ("" if code == self.chip.peek(self.xy, regs.GP_SCRATCH, regs.GP_SCRATCH_SIZE) else " (stale)")
+
     # -- what the silicon would check at release / warm entry --
     def _artefacts_ok(self, reset_pc: int = regs.RESET_PC, gp: Optional[bytes] = None) -> str:
         c = self.chip
@@ -212,8 +252,14 @@ class SimHart:
                     if not why and self.image is not None and c.peek(self.xy, regs.IMAGE_BASE,
                                                                      len(self.image)) != self.image:
                         why = "LIM image differs from monitor.bin"
-                    if why or self.lib.mon_x86_boot() != X86_RUNNING:
-                        self.state, self.why = "dead", why or "mon_x86_boot did not return RUNNING"
+                    if why:
+                        self.state, self.why = "dead", why
+                        return
+                    # stage 0's fence.i drops the line, but its next instruction (`jr a0`) is fetched again from it:
+                    # the line is back in L1I as the GP scratch holds it now (stage 0; the host swaps it later)
+                    self._l1i_fill()
+                    if self.lib.mon_x86_boot() != X86_RUNNING:
+                        self.state, self.why = "dead", "mon_x86_boot did not return RUNNING"
                         return
                     self.boots += 1
                     self._event("stage 0 -> crt0 (cold entry)")
@@ -227,6 +273,7 @@ class SimHart:
                         if why:
                             self.state, self.why = "dead", why
                             return
+                        self._l1i_fill()  # out of reset the hart fetches stage 0 from the GP scratch
                         self._stage0_run("release: stage 0 zero-filled LIM, waiting on the entry word")
                         self._secondaries_released("cold_e1f")
                         return
@@ -255,18 +302,22 @@ class SimHart:
                     return
                 self._halt()
                 self.rnmis += 1
+                # the RNMI handler is the code at 0x2001_0100 as hart 0's L1I holds it (RNMIs.md:48-59, Caches.md:
+                # 18-22): stage 0 re-zeroes LIM at once and spins on the (zeroed) entry word; the park stub spins on
+                # the trigger bit and then jumps to crt0 at the fixed 0x0800_0000 (park_stub.S); anything else is fatal
+                code = self._rnmi_code()
+                if self.stage0 is not None and code == self.stage0:
+                    gp = c.peek(self.xy, regs.GP_SCRATCH, regs.GP_SCRATCH_SIZE)
+                    self._stage0_run("RNMI during stage 0: stage 0 again (re-zeroes LIM)" if gp == code else
+                                     "RNMI ran stage 0 from the stale GP-scratch line in L1I (re-zeroes LIM)")
+                    return
+                if self.park_stub is not None and code != self.park_stub:
+                    self.state, self.why = "dead", "RNMI handler code at 0x2001_0100 is not the park stub"
+                    return
+                self._l1i_fill()  # the park stub's own fence.i, then the rest of it fetched again from the scratch
                 self.state = "rnmi"  # in the park stub, spinning on the trigger bit
                 self._event("RNMI taken: park stub")
             elif self.state == "rnmi" and not trig:
-                # the RNMI handler is whatever the GP scratch holds (RNMIs.md:48-59): the park stub jumps to crt0 at
-                # the fixed 0x0800_0000 (park_stub.S); E1F's stage 0 re-zeroes LIM; anything else is fatal
-                gp = c.peek(self.xy, regs.GP_SCRATCH, regs.GP_SCRATCH_SIZE)
-                if self.stage0 is not None and gp == self.stage0:
-                    self._stage0_run("RNMI during stage 0: stage 0 again (re-zeroes LIM)")
-                    return
-                if self.park_stub is not None and gp != self.park_stub:
-                    self.state, self.why = "dead", "RNMI handler code in the GP scratch is not the park stub"
-                    return
                 mnepc = c.peek32(self.xy, regs.MB_CMD + 32) | c.peek32(self.xy, regs.MB_CMD + 36) << 32
                 if self.lib.mon_x86_reenter(RNMI_MNCAUSE, mnepc or regs.LIM_BASE) != X86_RUNNING:
                     self.state, self.why = "dead", "mon_x86_reenter did not return RUNNING"
@@ -347,6 +398,12 @@ class SimHart:
                 self.state = "hung"
                 self._event("injected hang")
 
+    def l1i_load(self, code: bytes) -> None:
+        """Put `code` into hart 0's L1I as its GP-scratch line, as if fetched just now: e.g. stage 0, which is what a
+        crt0 without its entry fence.i left there after an E1F boot (T-3.8 case 2 on silicon, 2026-10-25)."""
+        with self._lock:
+            self.l1i_gp, self._l1i_fence = bytes(code), self._fence_count()
+
     def note_code_load(self, dst: int, data: bytes) -> Optional[str]:
         name_kind = self._payloads.get(hashlib.sha256(bytes(data)).hexdigest())
         if name_kind is None:
@@ -365,7 +422,7 @@ class SimHart:
 
     def status(self) -> dict:
         return {"tile": self.tile, "state": self.state, "why": self.why, "boots": self.boots, "rnmis": self.rnmis,
-                "rnmi_lost": self.rnmi_lost, "reentries": self.reentries, "cpu": self.cpu,
+                "rnmi_lost": self.rnmi_lost, "reentries": self.reentries, "cpu": self.cpu, "l1i_gp": self._l1i_name(),
                 "kernel_is_stub": bool(self.lib.mon_x86_kernel_is_stub()),
                 "variants_built": int(self.lib.mon_x86_variants_built()),
                 "build_id": int(self.lib.mon_x86_build_id()),
