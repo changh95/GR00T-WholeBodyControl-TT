@@ -18,19 +18,19 @@ heartbeat rate, per-call time; ego view of the active chunk). Full-resolution re
 [seed 2009, tick 1283](https://github.com/changh95/GR00T-WholeBodyControl-TT/releases/download/demo-videos/g1_tensix_vla_x280_wbc_seed2009.mp4).
 The checkpoint succeeds in about 20-30% of episodes in this env on any backend (M3.md); these seeds succeed every run.
 
-| Milestone | VLA | WBC | Status |
-|---|---|---|---|
-| M1 | RTX 5090 | RTX 5090 (CUDA graph) | done: async loop costs no success (T-1.9), RT timing 18/18 (T-1.4) |
-| M2 | Blackhole Tensix | RTX 5090 | done: TT vs GPU no success drop (T-2.5, T-2.7), 2 h RT soak 20/20 (T-2.8) |
-| M3 | Blackhole Tensix | Blackhole X280 (L2CPU3) | done: closed loop 21/21 (T-3.7), no success drop vs GPU WBC, fault recovery (T-3.8), 107 min soak with 0 WBC fallbacks (T-3.9) |
-| next | | X280, 4 tiles x up to 4 harts | single-hart kernel done (v3, 0.278 ms); S5a: all four L2CPU tiles probe clean; tensor-parallel firmware not yet written |
+| Stage | Status |
+|---|---|
+| M3: VLA on Tensix, WBC on the X280 (L2CPU3) | done: closed loop 21/21 (T-3.7), success rate no lower than the baseline's, fault recovery (T-3.8), 107 min soak with 0 WBC fallbacks (T-3.9) |
+| next: the WBC on 4 X280 tiles x up to 4 harts | single-hart kernel done (v3, 0.278 ms); S5a: all four L2CPU tiles probe clean; tensor-parallel firmware not yet written |
 
-Results: `docs/plan/vla-wbc-x280/results/` (M1.md, M2.md, M3.md). Design and test plan: `docs/plan/vla-wbc-x280/PLAN.md`.
+The simulator (MuJoCo physics and its camera renders) runs on the host; no policy runs there. The baselines the
+M3 numbers are compared against ran the VLA and the WBC on a GPU (M1.md, M2.md). Results:
+`docs/plan/vla-wbc-x280/results/`. Design and test plan: `docs/plan/vla-wbc-x280/PLAN.md`.
 Module contracts: `INTERFACES.md`. Test suites and how to run them: `TESTING.md`.
 
 ## Layout
 
-- `rtloop/` the 50 Hz loop (splicer, VLA/WBC clients, telemetry, viewer process); `rtserve/` GPU VLA and WBC servers
+- `rtloop/` the 50 Hz loop (splicer, VLA/WBC clients, telemetry, viewer process); `rtserve/` the baseline servers and the mock VLA used by the tests
 - `rttt/` the TT VLA server (`server_g1.py`) on the tt-metal megakernel GR00T port
 - `x280/` the X280 side: firmware (`fw/`: crt0, monitor, kernels, stage-0 LIM initialiser, multi-hart runtime),
   host layer (`host/kmd.py`, `host/wcio.c`), register map and write allowlist (`regs.py`), daemon (`x280d.py`), simulators
