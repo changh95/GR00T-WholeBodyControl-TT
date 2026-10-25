@@ -428,7 +428,7 @@ def test_orphan_left_by_job_is_killed(fk):
 
 
 def test_job_restarts_server_g1_via_start_vla(fk):
-    job = fk.job(f"""
+    job = fk.job("""
 "$CHIP_START_VLA" status > "$CHIP_SESSION_DIR/status1" || exit 11
 "$CHIP_START_VLA" stop || exit 12
 if "$CHIP_START_VLA" status; then exit 13; fi
@@ -907,7 +907,7 @@ def _proc_status(pid: int, key: str) -> str:
 
 def _pid_job(f: Fake) -> Path:
     """Records server_g1's CPU list and thread-pool environment, as the session started it."""
-    return f.job(f"""
+    return f.job("""
 pid=$(cut -d' ' -f1 "$CHIP_SESSION_DIR/server_g1.pid")
 grep Cpus_allowed_list /proc/$pid/status | sed 's/.*:[[:space:]]*//' > "$CHIP_SESSION_DIR/vla_cpus.txt"
 tr '\\0' '\\n' </proc/$pid/environ | grep -E '^(OPENBLAS|OMP|MKL)_NUM_THREADS=' | sort > "$CHIP_SESSION_DIR/vla_env.txt"

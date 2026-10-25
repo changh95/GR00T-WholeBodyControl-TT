@@ -126,7 +126,7 @@ def _norm_sf(z: float) -> float:
 def logrank_stratified(tn, en, tr, er) -> dict:
     """Log-rank test of new vs ref, stratified by seed (each stratum = one seed's pair of episodes)."""
     o_e = var = 0.0
-    for t1, e1, t2, e2 in zip(tn, en, tr, er):
+    for t1, e1, t2, e2 in zip(tn, en, tr, er, strict=True):
         for t in sorted({t for t, e in ((t1, e1), (t2, e2)) if e}):
             at1, at2 = t1 >= t, t2 >= t
             n_risk = at1 + at2
@@ -403,7 +403,7 @@ def run_jobs(jobs: list[dict], procs: int, resume: bool) -> list[dict]:
             if running:
                 time.sleep(0.2)
     except KeyboardInterrupt:
-        for job, p, log, _ in running:  # our own loop children only (each in its own process group)
+        for _, p, log, _ in running:  # our own loop children only (each in its own process group)
             stop_group(p)
             log.close()
         raise

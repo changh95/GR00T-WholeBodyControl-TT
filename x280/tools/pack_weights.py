@@ -192,7 +192,7 @@ def pack(onnx_dir: str = ONNX_DIR, dtype: str = "fp16", policies=(0, 1), tag: st
         check_graph(str(path))
         src_crc[p] = zlib.crc32(path.read_bytes())
         w = wbc_numpy_ref.load_initializers(str(path))  # float64 copies of float32: exact
-        for l, (prefix, (i, o)) in enumerate(zip(LAYERS, DIMS)):
+        for l, (prefix, (i, o)) in enumerate(zip(LAYERS, DIMS, strict=True)):
             W = w[f"{prefix}.weight"].astype(np.float32)
             b = w[f"{prefix}.bias"].astype(np.float32)
             assert W.shape == (o, i) and b.shape == (o,), (prefix, W.shape, b.shape)

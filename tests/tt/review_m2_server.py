@@ -9,8 +9,6 @@ Servers bind 127.0.0.1 on random ports (never 5555-5572).
 import threading
 import time
 
-import numpy as np
-import pytest
 import torch
 import zmq
 

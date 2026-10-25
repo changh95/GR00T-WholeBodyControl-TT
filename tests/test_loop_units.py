@@ -1,5 +1,6 @@
 """Unit tests of rt_sim's pure helpers: seeds/duration parsing, the D17 noise seed, the pacer."""
 
+import argparse
 import itertools
 import math
 
@@ -18,7 +19,7 @@ def test_parse_seeds():
     it, _ = loop.parse_seeds("1,5-6,9")
     assert list(it) == [1, 5, 6, 9]
     for bad in ("", "5-3", "a-b", "1-,4"):
-        with pytest.raises(Exception):
+        with pytest.raises(argparse.ArgumentTypeError):
             loop.parse_seeds(bad)
 
 

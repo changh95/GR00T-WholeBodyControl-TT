@@ -1131,7 +1131,6 @@ class HudView:
         return self.pill(surf, text, pos, fill, ink=ink, size=11, anchor="topright")
 
     def _chip(self, surf, m, rect, now_ns):
-        pg = self.pg
         x, y, w, h = rect
         self.panel(surf, rect, "BLACKHOLE p150a")
         chip = m.chip

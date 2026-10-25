@@ -253,7 +253,7 @@ def pack_l37(dst: int, length: int, data_crc32: int, kind: int, load_seq: int,
 
 
 def _unpack(fmt: str, fields, raw: bytes) -> dict:
-    return dict(zip(fields, struct.unpack(fmt, bytes(raw))))
+    return dict(zip(fields, struct.unpack(fmt, bytes(raw)), strict=True))
 
 
 def unpack_l0(raw: bytes) -> dict:

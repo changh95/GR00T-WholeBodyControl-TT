@@ -80,7 +80,7 @@ def make_obs(seed: int = 0, instruction: str = "pick up the apple, walk left and
     rng = np.random.default_rng(seed)
     obs = {schema.VIDEO_KEY: rng.integers(0, 256, (b, 1, *schema.IMAGE_SHAPE), dtype=np.uint8),
            schema.LANGUAGE_KEY: (instruction,) * b}
-    for (name, n), key in zip(schema.STATE_GROUPS, schema.STATE_KEYS):
+    for (_, n), key in zip(schema.STATE_GROUPS, schema.STATE_KEYS, strict=True):
         obs[key] = rng.uniform(-0.5, 0.5, (b, 1, n)).astype(np.float32)
     return obs
 

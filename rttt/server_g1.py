@@ -173,7 +173,7 @@ def warm_obs() -> Dict[str, Any]:
     """A G1 W-VLA observation (grey frame, zero state, the task instruction) when no golden is at hand."""
     obs = {schema.VIDEO_KEY: np.full((1, 1, *schema.IMAGE_SHAPE), 127, np.uint8),
            schema.LANGUAGE_KEY: ("pick up the apple, walk left and place the apple on the plate.",)}
-    for (name, n), key in zip(schema.STATE_GROUPS, schema.STATE_KEYS):
+    for (_, n), key in zip(schema.STATE_GROUPS, schema.STATE_KEYS, strict=True):
         obs[key] = np.zeros((1, 1, n), np.float32)
     return obs
 
@@ -518,7 +518,7 @@ class G1Server:
         return {"src": "server_g1", "pid": os.getpid(), "t_ns": now, "seq": int(seq), "backend": si.get("backend"),
                 "uptime_s": round((now - self.t0_ns) / 1e9, 3), "ready": ready is not None,
                 "calls": n, "errors": self.n_errors, "stale": self.n_stale,
-                "last_ms": dict(zip(keys, (round(v, 3) for v in last))) if last else None, "p50_ms": p50,
+                "last_ms": dict(zip(keys, (round(v, 3) for v in last), strict=True)) if last else None, "p50_ms": p50,
                 "device_duty": device_duty(dev, now, ready) if ready is not None else None,
                 "trace": st.get("trace"), "cq": st.get("cq"), "core_map": st.get("core_map"), "tree": si.get("tree"),
                 "telemetry": None}

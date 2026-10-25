@@ -30,7 +30,6 @@ import time
 
 import numpy as np
 
-from rtloop import schema
 from rttt import golden_io as gio
 from rttt.make_g1_golden import REPO, REVISION, sha256_file, snapshot_dir
 

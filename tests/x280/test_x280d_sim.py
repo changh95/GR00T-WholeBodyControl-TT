@@ -228,7 +228,7 @@ STEP_PREFIXES = ("step 1:", "step 2:", "step 3:", "steps 4-5:", "step 6:", "step
 def check_boot_dry_run(d: dict, tile: int = 3) -> None:
     """Every T-3.4 assertion on the parsed `x280d.py boot --tile 3 --dry-run` output."""
     xy = regs.L2CPU_XY[tile]
-    assert len(d["steps"]) == len(STEP_PREFIXES) and all(s.startswith(p) for s, p in zip(d["steps"], STEP_PREFIXES))
+    assert len(d["steps"]) == len(STEP_PREFIXES) and all(s.startswith(p) for s, p in zip(d["steps"], STEP_PREFIXES, strict=True))
     ops = d["ops"]
     by = {p: [o for o in ops if o["step"] and o["step"].startswith(p)] for p in STEP_PREFIXES}
     writes = [o for o in ops if o["kind"] in ("W32", "WC64")]
@@ -2085,7 +2085,7 @@ def test_stage0_dry_run_with_harts4_differs_only_in_the_secondary_vectors():
     ws = (lambda d: [(o["kind"], o["xy"], o["addr"], o["value"]) for o in d["ops"] if o["kind"] in ("W32", "WC64")])
     a, b = ws(base), ws(mh)
     assert len(a) == len(b) and [x[:3] for x in a] == [x[:3] for x in b]
-    diff = {x[2]: (x[3], y[3]) for x, y in zip(a, b) if x != y}
+    diff = {x[2]: (x[3], y[3]) for x, y in zip(a, b, strict=True) if x != y}
     want = {}
     for h in (1, 2, 3):
         want[regs.rnmi_handler(h)] = (regs.PARK_STUB, regs.RESET_PC)

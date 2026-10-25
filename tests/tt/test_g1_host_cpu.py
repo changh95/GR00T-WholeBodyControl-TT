@@ -145,7 +145,7 @@ def test_g1_layout_is_gr1_geometry(g1):
 def test_assert_call_ok_for_g1(g1, obs_factory):
     from models.experimental.gr00t.common import configs as C
     from models.experimental.gr00t.tt import model as M
-    from models.experimental.gr00t.tt.layout import DeviceLayout
+    from models.experimental.gr00t.tt.layout import DeviceLayout, StaticShapeError
     from models.experimental.gr00t.tt.policy import TTPolicy
 
     cfg = C.get_config("n16")
@@ -156,7 +156,7 @@ def test_assert_call_ok_for_g1(g1, obs_factory):
     mi, _ = g1.encode_obs(g1.split_batch(kept)[0])
     assert (mi.seq_len, mi.n_text, int(mi.embodiment_id[0])) == (117, 13, 8)
     dl.assert_call(mi, g1.make_noise(0), loaded_embodiment_ids=(8,))
-    with pytest.raises(Exception):
+    with pytest.raises(StaticShapeError):
         dl.assert_call(mi, g1.make_noise(0), loaded_embodiment_ids=(20,))
     pol = TTPolicy()
     for gather in ("device", "host"):

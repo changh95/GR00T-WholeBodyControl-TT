@@ -196,7 +196,7 @@ class ZmqWbc:
             return wire.loads(self.sock.recv())
         except zmq.Again:
             self._recreate()
-            raise TimeoutError(f"{self.url}: no reply to {endpoint!r} within {timeout_ms} ms")
+            raise TimeoutError(f"{self.url}: no reply to {endpoint!r} within {timeout_ms} ms") from None
         except zmq.ZMQError:
             self._recreate()
             raise

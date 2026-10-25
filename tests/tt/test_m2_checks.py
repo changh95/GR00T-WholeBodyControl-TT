@@ -256,7 +256,7 @@ def test_matrices_dry_run(tmp_path, matrix, arms, urls):
     assert r.returncode == 0, r.stderr
     lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
     assert len(lines) == 10
-    for arm, url in zip(arms, urls):
+    for arm, url in zip(arms, urls, strict=True):
         mine = [ln for ln in lines if ln.startswith(f"{arm}_")]
         assert len(mine) == 5
         for ln in mine:

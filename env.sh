@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Source this file: `source ~/experiments/GR00T-WholeBodyControl-TT/env.sh` (or a snapshot's own env.sh).
 #
 # Paths, ports and the interpreter wrappers used by every rtloop command (PLAN.md §0 "Interpreters
@@ -6,7 +7,8 @@
 # crashes on an empty CUDA_VISIBLE_DEVICES without MUJOCO_EGL_DEVICE_ID).
 
 # RT is the tree this file lives in: the repo, or a snapshot under snapshots/ (scripts/snapshot.sh).
-export RT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+RT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+export RT
 export R=$HOME/experiments/gr00t/Isaac-GR00T-n1.6
 export W=$R/external_dependencies/GR00T-WholeBodyControl
 export DEV=$HOME/experiments/gr00t/bin/with-device.sh

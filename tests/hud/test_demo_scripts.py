@@ -238,7 +238,7 @@ def test_m3_device_run_needs_the_e1f_approval_and_the_stage0_boot(tmp_path):
     assert p.returncode == 0, p.stderr[-2000:]
     rec = called.read_text().splitlines()
     assert "ENV X280_E1F_APPROVED=1" in rec and "ENV WITH_DEVICE_RESET_AFTER=1" in rec
-    assert f"ENV CHIP_X280D_SERVE_ARGS=serve --port 5558 --tile 3 --stage0 --cpus 5 --status-pub tcp://127.0.0.1:5573" in rec
+    assert "ENV CHIP_X280D_SERVE_ARGS=serve --port 5558 --tile 3 --stage0 --cpus 5 --status-pub tcp://127.0.0.1:5573" in rec
     args = [ln[4:] for ln in rec if ln.startswith("ARG ")]
     assert args[:5] == [str(RT / "scripts" / "chip_session.sh"), "--x280", "boot:3", "--vla", "tt"]
     assert args[-2:] == ["--job", str(RT / "jobs" / "demo_m3.sh")]

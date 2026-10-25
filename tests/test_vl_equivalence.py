@@ -42,7 +42,7 @@ def test_same_episodes_and_end_ticks(runs, capsys):
     n = SEEDS[1] - SEEDS[0] + 1
     assert len(ev) == len(es) == n
     keys = ("seed", "end", "k_end", "n_ticks", "success", "first_success_tick")
-    for a, b in zip(ev, es):
+    for a, b in zip(ev, es, strict=True):
         assert {k: a[k] for k in keys} == {k: b[k] for k in keys}
     with capsys.disabled():
         print("\n[T-1.2] " + "; ".join(f"seed {e['seed']}: {e['end']} at k={e['k_end']}" for e in ev))
@@ -69,7 +69,7 @@ def test_q43_bit_identical_every_tick(runs, capsys):
 
 @pytest.mark.sim
 def test_same_requests(runs):
-    (tv, rv, _), (ts, rs, _) = runs["vl"], runs["sync"]
+    (_, rv, _), (_, rs, _) = runs["vl"], runs["sync"]
     assert len(rv) == len(rs)
     for field in ("ep", "k_obs", "k_arr", "d", "state43_sent", "obs_sha1", "first_row", "last_row",
                   "n_rows_used", "outcome"):

@@ -188,7 +188,7 @@ def synthetic_obs(seed: int) -> dict:
     """A random but well-formed W-VLA observation (latency smoke only)."""
     rng = np.random.default_rng(seed)
     obs = {schema.VIDEO_KEY: rng.integers(0, 256, (1, 1, *schema.IMAGE_SHAPE), dtype=np.uint8)}
-    for (_, n), key in zip(schema.STATE_GROUPS, schema.STATE_KEYS):
+    for (_, n), key in zip(schema.STATE_GROUPS, schema.STATE_KEYS, strict=True):
         obs[key] = rng.uniform(-0.3, 0.3, (1, 1, n)).astype(np.float32)
     obs[schema.LANGUAGE_KEY] = (SYNTH_TASK,)
     return obs

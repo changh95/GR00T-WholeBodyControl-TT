@@ -235,7 +235,7 @@ def test_obs_sources(tmp_path, golden):
         telemetry.save_vla_obs(run, seq, obs)  # the loop's own dump format ('.' -> '__')
     from_run = B.load_obs_set([str(run)])
     assert len(from_run) == 3
-    for (_, a), (_, b) in zip(from_run, g[:3]):
+    for (_, a), (_, b) in zip(from_run, g[:3], strict=True):
         assert all(np.array_equal(a[k], b[k]) for k in schema.VLA_OBS_KEYS[:-1])
         assert a[schema.LANGUAGE_KEY] == b[schema.LANGUAGE_KEY]
     one = B.load_obs_set([str(run / "vla_obs" / "000001.npz"), str(golden / "obs" / "s05.npz")])

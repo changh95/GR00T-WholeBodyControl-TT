@@ -61,7 +61,7 @@ def _obs_from(z, name) -> dict:
         v = z[name(k)]
         obs[k] = (str(v[()]),) if k == schema.LANGUAGE_KEY else np.array(v)
     assert obs[schema.VIDEO_KEY].dtype == np.uint8 and obs[schema.VIDEO_KEY].shape == (1, 1, *schema.IMAGE_SHAPE)
-    for (name_, n), key in zip(schema.STATE_GROUPS, schema.STATE_KEYS):
+    for (_, n), key in zip(schema.STATE_GROUPS, schema.STATE_KEYS, strict=True):
         assert obs[key].dtype == np.float32 and obs[key].shape == (1, 1, n), (key, obs[key].shape)
     return obs
 

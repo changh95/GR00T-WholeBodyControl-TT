@@ -24,7 +24,7 @@ import zmq
 
 from rtloop import telemetry
 from rtloop.schema import TICK_DTYPE, WBC_BALANCE, Outcome
-from rtloop.telemetry import EpisodeLog, Publisher, RequestLog, RunDir, TickLog
+from rtloop.telemetry import Publisher, RequestLog, RunDir, TickLog
 
 from test_telemetry import ar, ev, synth, write_run  # noqa: E402 (shared synthetic-run helpers)
 

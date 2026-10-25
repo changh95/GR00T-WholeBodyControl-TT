@@ -239,7 +239,7 @@ class ProbeRun:
             self.rc = self.proc.wait(timeout_s)
         except subprocess.TimeoutExpired:
             self.kill()
-            raise AssertionError(f"{self.name}: no exit after {timeout_s} s (hang)\n{self.tail()}")
+            raise AssertionError(f"{self.name}: no exit after {timeout_s} s (hang)\n{self.tail()}") from None
         finally:
             if not self.log.closed:
                 self.log.close()

@@ -324,7 +324,7 @@ def check_obs(flat: Mapping[str, Any]) -> int:
         raise ValueError(f"{schema.VIDEO_KEY} must be uint8 (B, 1, H, W, 3), got "
                          f"{getattr(v, 'dtype', type(v).__name__)} {getattr(v, 'shape', '')}")
     b = int(v.shape[0])
-    for (name, d), key in zip(schema.STATE_GROUPS, schema.STATE_KEYS):
+    for (_, d), key in zip(schema.STATE_GROUPS, schema.STATE_KEYS, strict=True):
         a = flat[key]
         if not isinstance(a, np.ndarray) or a.dtype != np.float32 or a.shape != (b, 1, d):
             raise ValueError(f"{key} must be float32 ({b}, 1, {d}), got "

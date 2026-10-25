@@ -586,7 +586,7 @@ def test_infer_const_and_bench(variant, parity, x86):
         assert [c["sub"] for c in consts] == [0, 1, 2, 3]
         obs = np.stack([_const_obs(1 + c["sub"]) for c in consts])
         ref = _ref(x86, r, variant, p, obs)
-        for c, want in zip(consts, ref):
+        for c, want in zip(consts, ref, strict=True):
             got = np.array(c["l35"]["action"], np.float32)
             assert c["l1"]["state"] == ST["IDLE"] and c["l35"]["seq_echo"] == c["seq"]
             if variant in (V0, V2S, V3):

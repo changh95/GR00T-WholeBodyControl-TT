@@ -64,7 +64,7 @@ class LoopRun:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait(10)
-            raise AssertionError(f"{self.name}: no exit after {timeout_s} s\n{self.tail()}")
+            raise AssertionError(f"{self.name}: no exit after {timeout_s} s\n{self.tail()}") from None
         finally:
             self.log.close()
         assert rc == 0, f"{self.name}: exit {rc}\n{self.tail()}"

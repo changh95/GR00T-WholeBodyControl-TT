@@ -238,7 +238,7 @@ def _diffs(a, b, path: str = "", out: Optional[list] = None, limit: int = 20) ->
         for k in sorted(set(a) | set(b), key=str):
             _diffs(a.get(k), b.get(k), f"{path}.{k}" if path else str(k), out, limit)
     elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
-        for i, (x, y) in enumerate(zip(a, b)):
+        for i, (x, y) in enumerate(zip(a, b, strict=True)):
             _diffs(x, y, f"{path}[{i}]", out, limit)
     elif a != b:
         out.append(f"{path}: {a!r} -> {b!r}")

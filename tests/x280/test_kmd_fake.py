@@ -181,7 +181,7 @@ def test_windows_configured_once_and_mapped_by_policy(dev):
     assert dev.names() == ["ALLOCATE_TLB", "CONFIGURE_TLB"] * len(specs)
     assert sorted(dev.configure_count.values()) == [1] * len(specs)
     cfgs = [f for _, n, f, _ in dev.ioctls if n == "CONFIGURE_TLB"]
-    for spec, c in zip(specs, cfgs):
+    for spec, c in zip(specs, cfgs, strict=True):
         assert (c["addr"], (c["x_end"], c["y_end"])) == (spec.base, spec.xy)
         assert (c["noc"], c["ordering"], c["mcast"], c["linked"], c["static_vc"], c["x_start"], c["y_start"]) == \
             (0, 1, 0, 0, 0, 0, 0)
@@ -1417,7 +1417,7 @@ def test_secondary_vectors_need_the_flag_and_the_approval(dev, monkeypatch):
         s.write_boot_vectors(3, reset_pc=regs.STAGE0_ENTRY, harts=4)
         mh = [(o.addr, o.value) for o in s.oplog[n:] if o.kind == "W32" and o.detail == "boot_vectors"]
     assert [a for a, _ in mh] == [a for a, _ in default] and len(mh) == len(default) == 24
-    diff = {a: v for (a, v), (_, d) in zip(mh, default) if v != d}
+    diff = {a: v for (a, v), (_, d) in zip(mh, default, strict=True) if v != d}
     want = {}
     for h in (1, 2, 3):
         want[regs.rnmi_handler(h)] = regs.RESET_PC

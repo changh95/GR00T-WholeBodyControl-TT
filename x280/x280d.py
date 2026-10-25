@@ -1497,7 +1497,7 @@ class Session:
                          and not (regs.MAILBOX_BASE <= a < regs.MAILBOX_BASE + 64 * regs.LINE)]
                 pick = rng.choice(len(lines), size=min(partial, len(lines)), replace=False)
                 pbad = 0
-                for j, li in enumerate(pick):
+                for _, li in enumerate(pick):
                     a = lines[int(li)] + 4 * int(rng.integers(0, 16))
                     v = int(rng.integers(0, 1 << 32))
                     k.uc_write32(a, v, tile)
@@ -1641,7 +1641,7 @@ class Session:
                            "max_events_per_read": most, "event_addr_is_the_read": bool(at_read)})
             for a in range(lo + p * regs.LINE, hi, regs.LINE):
                 got = k.read_lim_words(a, 16, tile)
-                bad += [a + 4 * i for i, (g, w) in enumerate(zip(got, words(a))) if g != int(w)]
+                bad += [a + 4 * i for i, (g, w) in enumerate(zip(got, words(a), strict=True)) if g != int(w)]
             snap["read1"] = k.read_ccache_ecc(tile)
             r = {"store": store, "how": K.LIM_INIT_STORES[store][3], "lines": n, "probe_write": pw, "probe_read": pr,
                  "bulk_write_s": round(tw, 6), "bulk_write_s_per_line": (tw / (n - p)) if n > p else None,
@@ -1671,7 +1671,7 @@ class Session:
                 bad2 = []
                 for a in range(lo, hi, regs.LINE):
                     got = k.read_lim_words(a, 16, tile)
-                    for i, (g, w) in enumerate(zip(got, words(a))):
+                    for i, (g, w) in enumerate(zip(got, words(a), strict=True)):
                         if g != over.get(a + 4 * i, int(w)):
                             bad2.append(a + 4 * i)
                 snap["read2"] = k.read_ccache_ecc(tile)
@@ -1932,7 +1932,7 @@ class Session:
                 want = zlib.crc32(self.image[:ln])
                 out["checksum"].append(bool(not r["timeout"] and r.get("l39", {}).get("ret") == want))
             out["load_hang"] = self.load_code(t, _read_artefact(PAYLOAD_DIR / "hang.bin"))
-        for i in range(n):
+        for _ in range(n):
             with self.batch(t):
                 r = self.call(t, regs.WEIGHTS_BASE, deadline_s=0.05)
             p = self.park(t)
@@ -2155,7 +2155,7 @@ class Session:
                     t_next = now + sample_us * 1e-6
                     while time.perf_counter() < t_next:
                         pass
-            for i in range(fd_churn):
+            for _ in range(fd_churn):
                 sample(time.perf_counter() + gap_s / 2)
                 fd = k.backend.open(power_aware=False)  # legacy: power message, PLL4 relock (R27)
                 sample(time.perf_counter() + gap_s / 2)

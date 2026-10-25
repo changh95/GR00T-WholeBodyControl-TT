@@ -598,7 +598,7 @@ class FakeDevice:
         data = self.peek32(arc, regs.TELEMETRY_DATA_PTR)
         _, outs = regs.pll4_mhz(self.peek32(arc, regs.PLL4_CNTL_1), self.peek32(arc, regs.PLL4_CNTL_5),
                                 self.peek32(arc, regs.PLL4_USE_POSTDIV))
-        for tag, mhz in zip(regs.TAG_L2CPUCLK, outs):
+        for tag, mhz in zip(regs.TAG_L2CPUCLK, outs, strict=True):
             self.poke32(arc, data + 4 * tag, int(mhz) & 0xFFFF)
 
     # backend interface

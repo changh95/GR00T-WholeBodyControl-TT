@@ -300,7 +300,6 @@ def test_s4_and_t38_jobs_in_one_stage0_hold(session, tmp_path):
     pytest.importorskip("yaml")
     bench = tmp_path / "t23_bench.json"
     bench.write_text(json.dumps({"latency": {"server_span_ms": {"p50": 43.9609265}}, "pass": True}))
-    argv = tmp_path / "stub_argv.json"
     s = session(vla="mock")
     r = s.run("--x280", "boot:3", "--vla", "tt", "--job", JOBS / "m3_shadow.sh", "--job", JOBS / "m3_eval.sh",
               "--job", JOBS / "m3_faults.sh", "--tag", "s4", timeout=1200,
