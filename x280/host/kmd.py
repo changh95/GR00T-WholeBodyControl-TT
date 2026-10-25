@@ -475,6 +475,7 @@ class FakeDevice:
 
     def __init__(self, time0: float = 1000.0):
         self.regions = {}  # (xy, base) -> (memfd, mmap view)
+        self.lazy = {}  # (xy, base) -> [(addr, u32)]: written when that region is first created (no memfd before)
         self.ioctls = []  # (fd, name, decoded fields, errno or 0)
         self.calls = []  # ('open'|'close'|'mmap'|'munmap'|'release'|'cleanup', ...)
         self.fds = {}
@@ -501,6 +502,8 @@ class FakeDevice:
             fd = memfd(f"fakebh-{xy[0]}-{xy[1]}-{base:x}")
             os.ftruncate(fd, regs.TLB_2M)
             self.regions[key] = (fd, _mmap.mmap(fd, regs.TLB_2M))
+            for addr, value in self.lazy.pop(key, ()):  # reset values of a region no one has touched yet
+                self.regions[key][1][addr - base:addr - base + 4] = (value & 0xFFFF_FFFF).to_bytes(4, "little")
         return self.regions[key]
 
     @staticmethod
@@ -560,9 +563,18 @@ class FakeDevice:
         for tag, v in (telemetry or {}).items():
             d.poke32(arc, data + 4 * tag, v)
         d.update_l2cpuclk_telemetry()
-        for xy in regs.L2CPU_XY.values():
+        for t, xy in regs.L2CPU_XY.items():
             d.poke32(xy, regs.CCACHE0_CONFIG, 0x0609_1004)  # banks 4, ways 16, lg sets 9, lg block 6 (fake)
             d.poke32(xy, regs.CCACHE0_WAYENABLE, regs.WAYENABLE_EXPECTED)
+            # NIU #0 (S5a): the documented fields only (ISA NoC/MemoryMap.md:198-219, 247-257): raw NoC #0 x/y, the
+            # 17 x 12 grid, X-first routing; endpoint type L2CPU with tile index = the L2CPU index (assumed: the doc
+            # says only "0 to 3"); NIU_CFG_0 with just the translation bit, as TAG_NOC_TRANSLATION. The 256 TLB window
+            # slots stay 0 (their reset values are what S5a measures). Lazily: the region gets a memfd only once
+            # something maps or pokes it, so a chip nobody probes holds no more fds than before.
+            d.lazy[(xy, (regs.NIU0_PHYS + regs.XP_HIGH_OFFSET) & ~(regs.TLB_2M - 1))] = [
+                (regs.NIU0_NOC_NODE_ID, xy[0] | xy[1] << 6 | regs.NOC_GRID[0] << 12 | regs.NOC_GRID[1] << 19 | 1 << 28),
+                (regs.NIU0_NOC_ENDPOINT_ID, t | regs.NOC_ENDPOINT_TYPE_L2CPU << 8),
+                (regs.NIU0_NIU_CFG_0, regs.NIU_CFG_0_TRANSLATION if noc_translation == 1 else 0)]
         if ecc:
             d.ecc = FakeEcc(ecc, seed=ecc_seed)
             d.ecc_access = d._ecc_access  # the hook kmd looks for (absent on RealBackend and on a fake without a model)
@@ -809,12 +821,18 @@ class Kmd:
     def __init__(self, backend, tiles: tuple = (regs.DEFAULT_TILE,), *, cross_read: bool = False,
                  wcio: Optional[Wcio] = None, clock: Optional[Callable[[], float]] = None,
                  log_capacity: int = 1 << 17, oplog_cap: int = 1 << 17,
-                 step_sleep: Callable[[], None] = lambda: None):
+                 step_sleep: Callable[[], None] = lambda: None, probe_tiles: tuple = ()):
+        """probe_tiles (S5a): L2CPU tiles this session may only read, through regs.window_specs' probe windows; a probe
+        tile outside `tiles` is never written and never mapped writable, whatever regs.WRITABLE_TILES says."""
         for t in tiles:
             if t not in regs.WRITABLE_TILES:
                 raise PolicyError(f"tile {t} is not in regs.WRITABLE_TILES {regs.WRITABLE_TILES}")
+        for t in probe_tiles:
+            if t not in regs.L2CPU_XY:
+                raise PolicyError(f"probe tile {t} is not an L2CPU tile {tuple(regs.L2CPU_XY)}")
         self.backend = backend
         self.tiles = tuple(tiles)
+        self.probe_tiles = tuple(dict.fromkeys(probe_tiles))
         self.cross_read = cross_read
         self.clock = clock or (backend.clock if isinstance(backend, FakeDevice) else time.monotonic)
         self.step_sleep = step_sleep
@@ -905,7 +923,7 @@ class Kmd:
         self.t_open = self.clock()
         self._op("OPEN", detail=f"keeper fd {self.fd} legacy O_RDWR (power message; settle {KEEPER_SETTLE_S:.0f} s)")
         try:
-            for spec in regs.window_specs(self.tiles, self.cross_read):
+            for spec in regs.window_specs(self.tiles, self.cross_read, self.probe_tiles):
                 if regs.is_translated(spec.xy) and not self._noc_translation_on():
                     # review F6: (8, 26+i) exists only with CMFW's NoC translation on; never even allocate it
                     self._op("NOTE", spec.xy, spec.base, 0, None, f"{spec.name} not allocated: NoC translation off "
@@ -918,7 +936,8 @@ class Kmd:
         return self
 
     def _setup_window(self, spec: regs.WindowSpec) -> None:
-        if (spec not in regs.window_specs(self.tiles, self.cross_read) or tuple(spec.xy) not in regs.ALLOWED_TARGETS
+        if (spec not in regs.window_specs(self.tiles, self.cross_read, self.probe_tiles)
+                or tuple(spec.xy) not in regs.ALLOWED_TARGETS
                 or spec.base % regs.TLB_2M or spec.map_len > regs.TLB_2M):
             self._refuse(PolicyError, f"window {spec.name} {spec.xy} 0x{spec.base:x} is not a regs window")
         a = AllocateTlb()
@@ -1039,8 +1058,8 @@ class Kmd:
     def l2cpu_batch(self, tile: int):
         """PLAN §5.2 invariant 4: PLL4 at its defaults (read directly, ARC first) and ENABLED_L2CPU bit set
         before a batch of L2CPU-tile accesses; accesses outside a batch are refused (R28)."""
-        if tile not in self.tiles:
-            raise PolicyError(f"tile {tile} not in this session {self.tiles}")
+        if tile not in self.tiles and tile not in self.probe_tiles:
+            raise PolicyError(f"tile {tile} not in this session {self.tiles} (probe tiles {self.probe_tiles})")
         self._settled()
         pll = self.read_pll4()
         why = self.pll4_default_why(pll)
@@ -1234,7 +1253,16 @@ class Kmd:
         return {k: self.read32(regs.L2CPU_XY[tile], regs.beu_base(hart) + off) for k, off in regs.BEU.items()}
 
     # -- the write path --
+    def _probe_only(self, xy: tuple) -> Optional[int]:
+        """The tile of `xy` if it is a read-only probe tile of this session (S5a), else None. The session's own tile
+        counts too: a probe session (`serve --no-release --probe-tiles`) writes no L2CPU tile at all."""
+        t = regs.tile_of(xy)
+        return t if t is not None and t in self.probe_tiles else None
+
     def _policy(self, xy: tuple, addr: int, size: int, value: Optional[int], ctx: str) -> regs.Range:
+        if self._probe_only(xy) is not None:
+            self._refuse(PolicyError, f"L2CPU{regs.tile_of(xy)} is a read-only probe tile of this session (S5a)",
+                         xy, addr, size, value)
         allow, denies, why = regs.classify_write(xy, addr, size)
         for d in denies:
             if not (d.exception and d.exception == ctx):
@@ -1331,8 +1359,12 @@ class Kmd:
 
     @contextmanager
     def _transient(self, name: str, ctx: str, writable: bool = True):
-        """A UC mapping of window `name` that exists only for one privileged ctx (RW only if `writable`)."""
+        """A UC mapping of window `name` that exists only for one privileged ctx (RW only if `writable`; never for a
+        read-only probe tile)."""
         w = self.windows[name]
+        if writable and self._probe_only(w.spec.xy) is not None:
+            self._refuse(PolicyError, f"{name}: L2CPU{regs.tile_of(w.spec.xy)} is a read-only probe tile (S5a): no "
+                                      f"writable mapping for {ctx}", w.spec.xy, w.spec.base)
         va = self._map(w, "uc", PROT_READ | (PROT_WRITE if writable else 0))
 
         def w32(addr: int, value: int, pre_store: Optional[Callable[[], None]] = None) -> None:
@@ -1350,6 +1382,9 @@ class Kmd:
         why = regs.classify_read(xy, addr, 4)
         if why:
             self._refuse(PolicyError, why, xy, addr, 4)
+        if not w.spec.base <= addr <= w.spec.base + w.spec.map_len - 4:  # e.g. NIU #0 past a non-probe xp prefix
+            self._refuse(PolicyError, f"{w.spec.name} does not cover 0x{addr:x}+4 (maps 0x{w.spec.map_len:x} B from "
+                                      f"0x{w.spec.base:x})", xy, addr, 4)
         self._need_batch(xy, addr)
         v = self.wcio.uc_read32(va + addr - w.spec.base)
         self._op("R32", xy, addr, 4, v, "transient")
@@ -1753,6 +1788,23 @@ class Kmd:
         with self._transient(f"xp{tile}", "xp_read", writable=False) as (_, r32):
             return r32(regs.RNMI_TRIGGER) & regs.RNMI_TRIGGER_VALID_MASK
 
+    def read_tlb_slots(self, tile: int) -> dict:
+        """S5a: all 256 X280 -> NoC TLB window slots of a tile from the NoC side (regs.tlb_small_cfg / tlb_large_cfg,
+        ISA TLBWindows.md:20-34): 224 x 4 and 32 x 3 words in one transient read-only XP mapping."""
+        with self._transient(f"xp{tile}", "xp_read", writable=False) as (_, r32):
+            small = [[r32(regs.tlb_small_cfg(i) + 4 * n) for n in range(regs.TLB_SMALL_WORDS)]
+                     for i in range(regs.TLB_SMALL_N)]
+            large = [[r32(regs.tlb_large_cfg(j) + 4 * n) for n in range(regs.TLB_LARGE_WORDS)]
+                     for j in range(regs.TLB_LARGE_N)]
+        return {"small": small, "large": large}
+
+    def read_niu0(self, tile: int) -> dict:
+        """S5a: NIU #0's NOC_NODE_ID, NOC_ENDPOINT_ID and NIU_CFG_0 through the external-peripheral high alias (ISA
+        MemoryMap.md:121; NoC/MemoryMap.md:187-257), transient read-only XP mapping (a probe session's longer prefix)."""
+        with self._transient(f"xp{tile}", "xp_read", writable=False) as (_, r32):
+            return {"noc_node_id": r32(regs.NIU0_NOC_NODE_ID), "noc_endpoint_id": r32(regs.NIU0_NOC_ENDPOINT_ID),
+                    "niu_cfg_0": r32(regs.NIU0_NIU_CFG_0)}
+
     def l2pf_setup(self, tile: int) -> None:
         """Step 9: L2PF1 basic/user control of harts 0-3 (ISA Caches.md:57-64), read back."""
         with self._transient(f"ccache{tile}", "l2pf") as (w32, r32):
@@ -1765,6 +1817,8 @@ class Kmd:
     def set_noc_cleanup(self, tile: int = regs.DEFAULT_TILE, enabled: bool = True, fd: Optional[int] = None) -> SetNocCleanup:
         """Register (or clear) the KMD's close-time write of 'GONE' into L38 (KMD ioctl.h:331-360, chardev.c:1030-1039)."""
         xy, addr = regs.L2CPU_XY[tile], regs.MB_HOST_GONE
+        if self._probe_only(xy) is not None:
+            self._refuse(PolicyError, f"SET_NOC_CLEANUP on L2CPU{tile}, a read-only probe tile (S5a)", xy, addr, 4)
         allow, denies, why = regs.classify_write(xy, addr, 4)
         if allow is None or allow.name != "LIM" or denies or regs.lim_line_owner(addr) != "kmd":
             self._refuse(PolicyError, f"cleanup target not the allowlisted L38: {why}", xy, addr, 4)

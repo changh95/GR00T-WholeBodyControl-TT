@@ -346,6 +346,45 @@ RNMI_HANDLER_PHYS = 0x2001_0418  # hart h: handler @ +16h, exception handler @ +
 XP_TLBCFG_PHYS_LO, XP_TLBCFG_PHYS_HI = 0x2000_0000, 0x2000_0F7F  # X280 -> NoC TLB windows (ISA MemoryMap.md:108-109)
 XP_DMA_PHYS_LO, XP_DMA_PHYS_HI = 0x2008_0000, 0x2FFF_FFFF  # DMA engine + its copies (ISA MemoryMap.md:23-25)
 
+# S5a (docs/plan/vla-wbc-x280/research/four_tile_design.md step_plan): read-only probe of the outbound TLB window
+# slots and NIU #0, from the NoC through the same high alias as the vectors (ISA MemoryMap.md:104). Reads only: the
+# slots stay under DENY X280_TLB_CONFIG_HIGH and no ALLOW entry covers NIU #0.
+TLB_SMALL_N, TLB_LARGE_N = 224, 32  # 256 windows: 224 x 2 MiB + 32 x 128 GiB (ISA README.md:3; TLBWindows.md:3, 11-14)
+TLB_SMALL_WORDS = 4  # 16 B {u64 local_offset, u32 noc_properties_lo, u32 noc_properties_hi} (ISA TLBWindows.md:11, 22-27)
+TLB_LARGE_WORDS = 3  # 12 B {u32 local_offset, u32 noc_properties_lo, u32 noc_properties_hi} (ISA TLBWindows.md:12, 29-34)
+XP_TLB_LARGE_PHYS = XP_TLBCFG_PHYS_LO + 4 * TLB_SMALL_WORDS * TLB_SMALL_N  # 0x2000_0E00 (ISA MemoryMap.md:109)
+NIU0_PHYS = 0x2005_6000  # NIU #0 (NoC #0) configuration / status, 4 KiB (ISA MemoryMap.md:121; NoC/MemoryMap.md:3)
+NOC_ENDPOINT_TYPE_L2CPU = 0x0901  # NOC_ENDPOINT_ID bits 23:8 (ISA NoC/MemoryMap.md:218)
+NOC_GRID = (17, 12)  # NOC_NODE_ID width / height "in practice" (ISA NoC/MemoryMap.md:202-203)
+NIU_CFG_0_TILE_CLOCK_DISABLE = 1 << 12  # firmware sets it for fused-off tiles (ISA NoC/MemoryMap.md:252)
+NIU_CFG_0_TRANSLATION = 1 << 14  # coordinate translation enable (ISA NoC/MemoryMap.md:254)
+
+
+def tlb_small_cfg(i: int) -> int:
+    """Small window i's configuration, NoC side: 0xFFFF_F7FE_FFF0_0000 + 16 i (ISA MemoryMap.md:104, 108)."""
+    return xp_high(XP_TLBCFG_PHYS_LO + 4 * TLB_SMALL_WORDS * i)
+
+
+def tlb_large_cfg(j: int) -> int:
+    """Large window j's configuration, NoC side: 0xFFFF_F7FE_FFF0_0E00 + 12 j (ISA MemoryMap.md:104, 109)."""
+    return xp_high(XP_TLB_LARGE_PHYS + 4 * TLB_LARGE_WORDS * j)
+
+
+NIU0_NOC_NODE_ID = xp_high(NIU0_PHYS + 0x44)  # ISA NoC/MemoryMap.md:19, 193, 196-207
+NIU0_NOC_ENDPOINT_ID = xp_high(NIU0_PHYS + 0x48)  # ISA NoC/MemoryMap.md:19, 194, 211-219
+NIU0_NIU_CFG_0 = xp_high(NIU0_PHYS + 0x100)  # ISA NoC/MemoryMap.md:22, 230, 247-257
+
+
+def decode_noc_node_id(v: int) -> dict:
+    """NOC_NODE_ID fields (ISA NoC/MemoryMap.md:198-207)."""
+    return {"x": v & 0x3F, "y": (v >> 6) & 0x3F, "width": (v >> 12) & 0x7F, "height": (v >> 19) & 0x7F,
+            "x_first": bool(v >> 28 & 1)}
+
+
+def decode_noc_endpoint_id(v: int) -> dict:
+    """NOC_ENDPOINT_ID fields (ISA NoC/MemoryMap.md:215-219)."""
+    return {"index": v & 0xFF, "type": (v >> 8) & 0xFFFF, "noc": (v >> 24) & 0xFF}
+
 
 def reset_vector(hart: int) -> int:
     return xp_high(RESET_VECTOR_PHYS + 8 * hart)  # = 0xFFFF_F7FE_FFF1_0000 + 8h (PLAN §5.2 step 5; BHL boot.py:118)
@@ -478,8 +517,16 @@ class WindowSpec:
     why: str
 
 
-def window_specs(tiles: tuple = (DEFAULT_TILE,), cross_read: bool = False) -> tuple:
-    """The fixed window set: ARC registers, ARC CSM, and per tile LIM, CCACHE/L2PF, BEU, external peripherals."""
+XP_MAP_LEN = 0x11_1000  # the external-peripheral prefix up to the RNMI handlers (0xFFFF_F7FE_FFF1_0457)
+XP_PROBE_MAP_LEN = 0x15_7000  # ... up to NIU #0's page 0xFFFF_F7FE_FFF5_6000..6FFF: S5a probe sessions only
+
+
+def window_specs(tiles: tuple = (DEFAULT_TILE,), cross_read: bool = False, probe_tiles: tuple = ()) -> tuple:
+    """The fixed window set: ARC registers, ARC CSM, and per tile LIM, CCACHE/L2PF, BEU, external peripherals.
+    probe_tiles (S5a: `x280d probe --tile 3,2,1,0`, `serve --no-release --probe-tiles`): read-only tiles; a probe tile
+    outside `tiles` gets only CCACHE0 (+ the translated cross-read) and the external-peripheral prefix, and with
+    probe_tiles every xp prefix reaches NIU #0's page. Without probe_tiles the set is unchanged."""
+    xp_len = XP_PROBE_MAP_LEN if probe_tiles else XP_MAP_LEN
     out = [
         WindowSpec("arc", ARC_XY, 0x8000_0000, 0x3_1000, "ro", False,
                    "PLL4 0x8002_0500 + reset unit 0x8003_0000..0FFF (L2CPU_RESET, SCRATCH_RAM); writes transient"),
@@ -492,13 +539,27 @@ def window_specs(tiles: tuple = (DEFAULT_TILE,), cross_read: bool = False) -> tu
             WindowSpec(f"ccache{t}", xy, 0x0200_0000, 0x3_8000, "ro", False,
                        "CCACHE0 regs (WAYENABLE read-only), ECC counters, L2PF 0x0203_0000..7FFF; writes transient"),
             WindowSpec(f"beu{t}", xy, 0x0160_0000, 0x10_4000, "ro", False, "hart BEUs 0x0170_0000..3FFF"),
-            WindowSpec(f"xp{t}", xy, 0xFFFF_F7FE_FFE0_0000, 0x11_1000, "none", False,
+            WindowSpec(f"xp{t}", xy, 0xFFFF_F7FE_FFE0_0000, xp_len, "none", False,
                        "external peripherals page 0xFFFF_F7FE_FFF1_0000 (vectors, GP scratch, RNMI); "
                        "the prefix's first MiB is reserved alias space, so this window is never mapped persistently"),
         ]
         if cross_read:
             out.append(WindowSpec(f"ccache{t}x", L2CPU_XY_TRANSLATED[t], 0x0200_0000, 0x1_1000, "ro", False,
                                   "translated-coordinate CCACHE0_CONFIG cross-read (T-3.E0)"))
+    for t in dict.fromkeys(probe_tiles):
+        if t in tiles:
+            continue
+        xy = L2CPU_XY[t]
+        out += [
+            WindowSpec(f"ccache{t}", xy, 0x0200_0000, 0x1_1000, "ro", False,
+                       "S5a probe tile: CCACHE0 regs (WAYENABLE, CONFIG, ECC counters), read only"),
+            WindowSpec(f"xp{t}", xy, 0xFFFF_F7FE_FFE0_0000, xp_len, "none", False,
+                       "S5a probe tile: TLB window slots, hart status, NIU #0 through transient read-only mappings; "
+                       "the prefix's first MiB is reserved alias space, so this window is never mapped persistently"),
+        ]
+        if cross_read:
+            out.append(WindowSpec(f"ccache{t}x", L2CPU_XY_TRANSLATED[t], 0x0200_0000, 0x1_1000, "ro", False,
+                                  "translated-coordinate CCACHE0_CONFIG cross-read (T-3.E0, S5a)"))
     return tuple(out)
 
 
@@ -602,7 +663,19 @@ READ = (
     Range("L2PF", "l2cpu", l2pf_base(0), l2pf_base(3) + 0x1FFF, "ISA MemoryMap.md:77-80"),
     Range("BEU", "l2cpu", beu_base(0), beu_base(3) + 0xFFF, "ISA MemoryMap.md:69-72"),
     Range("XP_PAGE", "l2cpu", reset_vector(0), rnmi_exc_handler(3) + 7, "ISA MemoryMap.md:111-119"),
+    # S5a (four_tile_design.md step_plan): reset values of the 256 outbound TLB window slots and NIU #0's id/config,
+    # high alias; hart status 0x2001_0400 is in XP_PAGE above (ISA MemoryMap.md:115)
+    Range("X280_TLB_SMALL_CFG", "l2cpu", tlb_small_cfg(0), tlb_small_cfg(TLB_SMALL_N) - 1,
+          "224 x 16 B small TLB window configuration (ISA MemoryMap.md:104, 108; TLBWindows.md:11, 22-27)"),
+    Range("X280_TLB_LARGE_CFG", "l2cpu", tlb_large_cfg(0), tlb_large_cfg(TLB_LARGE_N) - 1,
+          "32 x 12 B large TLB window configuration (ISA MemoryMap.md:104, 109; TLBWindows.md:12, 29-34)"),
+    Range("NIU0_ID", "l2cpu", NIU0_NOC_NODE_ID, NIU0_NOC_ENDPOINT_ID + 3,
+          "NIU #0 NOC_NODE_ID, NOC_ENDPOINT_ID, read only (ISA MemoryMap.md:104, 121; NoC/MemoryMap.md:19, 187-219)"),
+    Range("NIU0_CFG_0", "l2cpu", NIU0_NIU_CFG_0, NIU0_NIU_CFG_0 + 3,
+          "NIU #0 NIU_CFG_0: bit 12 tile clock disable, bit 14 translation (ISA MemoryMap.md:121; "
+          "NoC/MemoryMap.md:22, 230, 247-257)"),
 )
+S5A_READ = ("X280_TLB_SMALL_CFG", "X280_TLB_LARGE_CFG", "NIU0_ID", "NIU0_CFG_0")
 
 
 def _kind(xy: tuple) -> str:
@@ -670,7 +743,9 @@ def _self_check() -> None:
     assert RNMI_TRIGGER == 0xFFFF_F7FE_FFF1_0414 and LOAD_BASE == 0x0801_1000 and MONITOR_REGION[1] == MB_CMD
     assert len(set(STATUS_TELEMETRY_TAGS) | {TAG_NOC_TRANSLATION, TAG_ENABLED_L2CPU}) == 13
     assert LIM_END == 0x081E_0000 and MB_HOST_GONE == 0x0801_0980 and MB_ACTION == 0x0801_08C0
-    for w in window_specs(tuple(L2CPU_XY), cross_read=True):
+    probe_set = window_specs((DEFAULT_TILE,), True, tuple(L2CPU_XY))  # S5a: four probe tiles next to the session's
+    assert len({w.name for w in probe_set}) == len(probe_set)
+    for w in window_specs(tuple(L2CPU_XY), cross_read=True) + probe_set:
         assert w.base % TLB_2M == 0 and 0 < w.map_len <= TLB_2M and w.map_len % 4096 == 0, w.name
         assert tuple(w.xy) in ALLOWED_TARGETS, w.name
         lo, hi, kind = w.base, w.base + w.map_len - 1, _kind(w.xy)
@@ -700,6 +775,20 @@ def _self_check() -> None:
     assert lim_line_owner(mh_stat(1), released=True) == "x280" and lim_line_owner(MH_CTL, released=False) == "host"
     assert MHB_END == STAGE0_ENTRY_WORD and MHB_BASE % LINE == 0 and MHB_BASE >= 0x081D_E400 + 4 * 1000
     assert STAGE0_SEC_WFI == 0x2001_013A and MH_SEC_MASK == RNMI_TRIGGER_VALID_MASK & ~1
+    # S5a: slot and NIU #0 addresses as ISA MemoryMap.md:104, 108-109, 121 give them; readable on every tile, writable
+    # on none; only a probe session's xp prefix reaches NIU #0 (the default one is unchanged)
+    assert tlb_small_cfg(0) == 0xFFFF_F7FE_FFF0_0000 and tlb_large_cfg(0) == 0xFFFF_F7FE_FFF0_0E00
+    assert tlb_small_cfg(TLB_SMALL_N) == tlb_large_cfg(0) and tlb_large_cfg(TLB_LARGE_N) - 1 == xp_high(XP_TLBCFG_PHYS_HI)
+    assert (NIU0_NOC_NODE_ID, NIU0_NOC_ENDPOINT_ID, NIU0_NIU_CFG_0) == (0xFFFF_F7FE_FFF5_6044, 0xFFFF_F7FE_FFF5_6048,
+                                                                        0xFFFF_F7FE_FFF5_6100)
+    assert {r.name for r in READ if r.name in S5A_READ} == set(S5A_READ)
+    xp_lo = next(w for w in window_specs() if w.name == f"xp{DEFAULT_TILE}").base
+    for r in (r for r in READ if r.name in S5A_READ):
+        assert r.hi < xp_lo + XP_PROBE_MAP_LEN, r.name
+        for xy in L2CPU_XY.values():
+            for a in (r.lo, r.hi - 3):
+                assert not classify_read(xy, a, 4) and classify_write(xy, a, 4)[0] is None, (r.name, xy, hex(a))
+    assert xp_lo + XP_MAP_LEN <= NIU0_NOC_NODE_ID
 
 
 _self_check()

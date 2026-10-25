@@ -410,8 +410,9 @@ def test_gddr_unreachable(k):
         for a in (0xFFFF_F7FE_FFE0_0000, 0xFFFF_F7FE_FFF0_0000):
             with pytest.raises(K.PolicyError):
                 w32(a, 0)
-            with pytest.raises(K.PolicyError):
-                r32(a)
+        with pytest.raises(K.PolicyError):
+            r32(0xFFFF_F7FE_FFE0_0000)
+        assert r32(0xFFFF_F7FE_FFF0_0000) == 0  # small TLB slot 0: readable since S5a (regs X280_TLB_SMALL_CFG)
 
 
 def test_pll_registers_denied_except_the_clock_py_walk(k, dev):

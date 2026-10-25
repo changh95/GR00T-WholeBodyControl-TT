@@ -60,7 +60,8 @@ def _cpu_set(spec: str) -> list:
 
 CPUS = sorted(set(os.sched_getaffinity(0)) & set(_cpu_set(X280_CPUS))) or _cpu_set(X280_CPUS)
 X280D_CPU, HART_CPU = CPUS[-2], CPUS[-1]  # x280d's --cpus and its sim hart: never CPU 5 (the device run's)
-CLIENT_CPUS = f"{CPUS[-4]},{CPUS[-3]}"  # bench --rtt's client (the device run pins rt_sim's 2,3)
+# bench --rtt's client (the device run pins rt_sim's 2,3); with fewer than 4 CPUs (X280_CPUS=0,1) it shares theirs
+CLIENT_CPUS = f"{CPUS[-4]},{CPUS[-3]}" if len(CPUS) >= 4 else f"{CPUS[0]},{CPUS[-1]}"
 assert 5 not in (X280D_CPU, HART_CPU)
 
 
@@ -131,6 +132,8 @@ exec env PYTHONPATH={RT} {PY} -m rtserve.mock_vla_server --mode hold --port "$po
             "CHIP_X280_READY_TIMEOUT_S": "120", "CHIP_VLA_READY_TIMEOUT_S": "60", "WITH_DEVICE_RESET_AFTER": "1",
             "X280_E1F_APPROVED": "1", "CHIP_X280D_SERVE_ARGS": self.serve_args,
             "X280_RTT_CLIENT_CPUS": CLIENT_CPUS,
+            # the fake server_g1 on this run's CPUs: chip_lib.sh vla_start pins server_g1 to its --cpus, default 8-11
+            "CHIP_VLA_EXTRA_ARGS": f"--cpus {','.join(map(str, CPUS))}",
         })
 
     def run(self, *args, timeout=900, **env) -> subprocess.CompletedProcess:
@@ -414,3 +417,34 @@ def test_s3b_refuses_without_the_secondary_vectors_or_the_approval(session):
                CHIP_X280D_SERVE_ARGS=s2.serve_args + " --harts 4", X280_MH_APPROVED="__unset__")
     assert r.returncode != 0 and "X280_MH_APPROVED" in (s2.dir() / "x280d.log").read_text(), _fail(r)
     assert not (s2.dir() / "s3b_adopt.json").exists()
+
+
+# --- S5a: the read-only probe of L2CPU0-3 on a no-release session (jobs/s5a_probe.sh) ---------------------------------
+
+
+def test_s5a_probe_session(session):
+    """jobs/s5a_probe.sh as its header launches it: --x280 probe with the daemon's --probe-tiles 3,2,1,0, --vla none
+    --debug-endpoints; the job probes all four tiles through that daemon, starts server_g1 (the fake) as the
+    session's child, probes again while it serves and compares. No release (L2CPU_RESET 0x0F before and after both
+    probes), both probes clean and equal field by field, TT digests identical; the TT p50 row is the fake's timing,
+    so only its consistency with the verdict is checked."""
+    s = session()
+    args = f"serve --port {s.x280_port} --tile 3 --no-release --probe-tiles 3,2,1,0 --cpus {X280D_CPU}"
+    r = s.run("--x280", "probe", "--vla", "none", "--debug-endpoints", "--job", JOBS / "s5a_probe.sh", "--tag", "s5a",
+              timeout=900, CHIP_X280D_SERVE_ARGS=args, S5A_TT_N=10)
+    assert r.returncode in (0, 1), _fail(r)
+    assert _started(s, "x280d")[0].endswith(args) and len(_started(s, "server_g1")) == 1
+    sm = s.json("s5a_summary.json")
+    for name in ("probe_keeper", "probe_tt"):
+        assert sm[name]["verdict"] == "clean" and sm[name]["rc"] == "0" and not sm[name]["reasons"], sm[name]
+    assert sm["probes_equal"] and sm["probe_diffs"] == [] and sm["tt_bit_identical"] and sm["harvested"] == []
+    assert sm["tt_p50_ms"][0] and sm["tt_p50_ms"][1] and sm["tt_max_ms_during_probe"] is not None
+    assert sm["pass"] == sm["tt_p50_within_2pct"] and r.returncode == (0 if sm["pass"] else 1), sm["s5b"]
+    for name in ("s5a_probe_keeper.json", "s5a_probe_tt.json"):
+        p = s.json(name)
+        assert p["probe"] == "s5a" and p["backend"] == "sim" and p["tiles_order"] == [3, 2, 1, 0]
+        assert p["l2cpu_reset"] == p["l2cpu_reset_after"] == 0x0F and all(p["tiles"][t]["probed"] for t in "0123")
+    log = r.stdout + r.stderr
+    assert "S5a L2CPU0 (8,3): WAYENABLE 0" in log and ("S5a -> S5b: GO" in log or "S5a -> S5b: NO-GO: TT p50" in log)
+    assert "no-release: keeper fd and windows up" in (s.dir() / "x280d.log").read_text()
+    assert [e["rc"] for e in s.events() if e["event"] == "job_end"] == [str(r.returncode)]

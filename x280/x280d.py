@@ -8,6 +8,8 @@ W-WBC (§1.4.3) on REP 127.0.0.1:5558, so rt_sim switches to the X280 with one U
 and falls back to ORT on any error reply. Every address and expected value comes from x280/regs.py.
 
     xpy $RT/x280/x280d.py probe --json                       # chip_session step 1 (L2CPU health check)
+    xpy $RT/x280/x280d.py probe --tile 3,2,1,0 --via tcp://127.0.0.1:5558  # S5a (jobs/s5a_probe.sh): read-only, the
+                                                             # daemon runs `serve --no-release --probe-tiles 3,2,1,0`
     X280_E1F_APPROVED=1 xpy $RT/x280/x280d.py serve --port 5558 --tile 3 --stage0  # chip_session step 3, boot:3
                                                              # (probe: --no-release, attach: --attach)
     xpy $RT/x280/x280d.py serve --backend sim --port 5558    # T-3.3: no device (x280/mailbox_sim.py)
@@ -285,6 +287,61 @@ def lim_pattern(seed: int):
     return line
 
 
+# --- S5a: the `probe --tile LIST` report (Session.tiles_probe) -----------------------------------------------
+
+
+S5A_SCHEMA = 1  # `probe --tile LIST` report (Session.tiles_probe); x280/tools/m3_jobs.py s5a-summary reads it
+
+
+def _tlb_summary(slots: dict) -> dict:
+    """The raw slot words plus each distinct value with how many slots hold it and the first one (S5a's baseline)."""
+    out = dict(slots)
+    for kind in ("small", "large"):
+        groups: dict = {}
+        for i, words in enumerate(slots[kind]):
+            groups.setdefault(tuple(words), []).append(i)
+        out[f"{kind}_distinct"] = [{"words": list(w), "slots": len(ix), "first": ix[0]} for w, ix in groups.items()]
+        out[f"{kind}_nonzero"] = sum(1 for words in slots[kind] if any(words))
+    return out
+
+
+def _tile_probe_warnings(t: int, tr: dict, noc_translation: Optional[int]) -> list:
+    """What a probed tile's recorded registers show that the documents would not lead one to expect (never gating)."""
+    out = []
+    if tr.get("cross_read_equal") is False:
+        out.append(f"L2CPU{t}: CCACHE0_CONFIG 0x{tr['ccache_config']:08x} raw != 0x{tr['ccache_config_translated']:08x} "
+                   "translated (R31)")
+    ecc = tr.get("ecc") or {}
+    counts = {key: ecc[key] for key in ECC_COUNT_KEYS if ecc.get(key)}
+    if counts:
+        out.append(f"L2CPU{t}: CCACHE ECC counts at the start {counts} (baseline recorded)")
+    niu = tr.get("niu0")
+    if niu:
+        node, ep = niu["node"], niu["endpoint"]
+        if [node["x"], node["y"]] != tr["xy"] or (node["width"], node["height"]) != regs.NOC_GRID or not node["x_first"]:
+            out.append(f"L2CPU{t}: NOC_NODE_ID 0x{niu['noc_node_id']:08x} {node} is not NoC #0 {tuple(tr['xy'])} on the "
+                       f"{regs.NOC_GRID[0]} x {regs.NOC_GRID[1]} X-first grid")
+        if ep["type"] != regs.NOC_ENDPOINT_TYPE_L2CPU or ep["noc"] != 0:
+            out.append(f"L2CPU{t}: NOC_ENDPOINT_ID 0x{niu['noc_endpoint_id']:08x} {ep} is not an L2CPU on NoC #0")
+        if niu["translation_enable"] != (noc_translation == 1):
+            out.append(f"L2CPU{t}: NIU_CFG_0 bit 14 = {int(niu['translation_enable'])}, TAG_NOC_TRANSLATION = "
+                       f"{noc_translation}")
+        if niu["tile_clock_disable"]:
+            out.append(f"L2CPU{t}: NIU_CFG_0 bit 12 (tile clock disable) is set")
+    return out
+
+
+def tiles_probe_rc(rep: dict) -> int:
+    """Exit code of `probe --tile LIST`: 0 clean; 4 when only ENABLED_L2CPU != 0xF (harvested: a reset would not help);
+    3 for any other failed check (X280 dirty); 1 when there is no report (an error reply)."""
+    c = rep.get("checks") if isinstance(rep, dict) else None
+    if not isinstance(c, dict):
+        return 1
+    if not all(v for key, v in c.items() if key != "enabled_l2cpu"):
+        return 3
+    return 0 if c.get("enabled_l2cpu") else 4
+
+
 # --- x86 reference kernel (the same blob, ctypes) ------------------------------------------------------------
 
 
@@ -455,9 +512,12 @@ class Session:
     def __init__(self, backend: str = "sim", tiles: tuple = (regs.DEFAULT_TILE,), *, dtype: str = "fp16",
                  variant: Optional[str] = None, ledger_path: Optional[Path] = None, cross_read: bool = False,
                  sim_cpus: Optional[list] = None, hart: bool = True, blob_paths: Optional[dict] = None,
-                 first_poll_us: float = POLL_FIRST_US, chip=None, sim_ecc: Optional[str] = None, harts: int = 1):
+                 first_poll_us: float = POLL_FIRST_US, chip=None, sim_ecc: Optional[str] = None, harts: int = 1,
+                 probe_tiles: tuple = ()):
         if backend not in ("device", "sim"):
             raise ValueError(f"backend {backend!r}")
+        if probe_tiles and hart:
+            raise ValueError("probe tiles (S5a) go only with a session that releases no hart (probe, serve --no-release)")
         if harts not in (1, regs.MH_HARTS):
             raise ValueError(f"--harts {harts}: 1 or {regs.MH_HARTS}")
         if harts == regs.MH_HARTS and tuple(tiles) != (regs.DEFAULT_TILE,):
@@ -511,7 +571,7 @@ class Session:
             be = self.chip
         else:
             be = K.RealBackend()
-        self.k = K.Kmd(be, self.tiles, cross_read=cross_read)
+        self.k = K.Kmd(be, self.tiles, cross_read=cross_read, probe_tiles=tuple(probe_tiles))
         # sim: a spinning hart thread without its own CPU, and too few CPUs for it next to this thread -> poll by sleeping
         unpinned = len(self.tiles) - len(sim_cpus or []) if hart else 0
         free = len(os.sched_getaffinity(0) - set(sim_cpus or []))
@@ -1666,6 +1726,121 @@ class Session:
                                  for tr in r["tiles"].values()) and r["heartbeat_increasing"])
         return r
 
+    # -- S5a (docs/plan/vla-wbc-x280/research/four_tile_design.md step_plan): several tiles, read only --
+    def tiles_probe(self, tiles: tuple) -> dict:
+        """The read-only probe of L2CPU tiles `tiles`, in that order, on this session's keeper fd; nothing is written and
+        no hart is released. ARC first: L2CPU_RESET, PLL4, PLL_LOCK, the telemetry (ENABLED_L2CPU, TAG_NOC_TRANSLATION,
+        TIMER_HEARTBEAT, L2CPUCLK0-3). A tile that is not enabled, whose L2CPUCLK derives to 0 MHz from PLL4, that is
+        released, or any tile while PLL4 is off its defaults (§5.2 invariant 4, R28) is reported and skipped, never
+        read. Then per tile, inside its l2cpu_batch (PLL4 re-read): WAYENABLE, CCACHE0_CONFIG raw and (translation on)
+        translated, the CCACHE ECC registers, the hart-status word, NIU #0's NOC_NODE_ID / NOC_ENDPOINT_ID /
+        NIU_CFG_0, all 256 TLB window slots; L2CPU_RESET and PLL4 again at the end. The BEUs are not read: no source
+        says a hart's BEU answers while the harts are in reset (review F7, kmd.read_beu). Only L2CPU_RESET 0x0F, PLL4
+        at its defaults, ENABLED_L2CPU 0xF and WAYENABLE 0 (and a complete probe) decide the verdict; the rest is a
+        recorded baseline, with `warnings` for what looks odd."""
+        k = self.k
+        tiles = tuple(int(t) for t in tiles)
+        if not tiles or len(set(tiles)) != len(tiles) or any(t not in k.probe_tiles for t in tiles):
+            raise X280Error(f"tiles probe {tiles}: this session's probe tiles are {k.probe_tiles} (standalone "
+                            "`probe --tile LIST`, or `serve --no-release --probe-tiles LIST` for `probe --via`)")
+        n0 = k.wcio.log_total()
+        rst, pll = k.read_l2cpu_reset(), k.read_pll4()
+        lock = k.read32(regs.ARC_XY, regs.PLL_LOCK)
+        # CMFW's cable-fault mode clock-gates every tile outside column 15 through NIU_CFG_0, which only a read through
+        # the tile itself would show (R28): ERROR_STATUS0 = SCRATCH_RAM[4] bit INIT_STAGE_CABLE_FAULT (FW reset.c:51-59,
+        # 341-348; init.h:113; status_reg.h:37)
+        err0 = k.read32(regs.ARC_XY, regs.scratch_ram(4))
+        cable_fault = bool(err0 & 1 << 1)
+        tele = k.read_telemetry((regs.TAG_TIMER_HEARTBEAT, regs.TAG_ENABLED_L2CPU, regs.TAG_NOC_TRANSLATION,
+                                 *regs.TAG_L2CPUCLK))
+        en, xlat = tele.get(regs.TAG_ENABLED_L2CPU, 0), tele.get(regs.TAG_NOC_TRANSLATION, 0)
+        why_pll = k.pll4_default_why(pll)
+        _, mhz = regs.pll4_mhz(pll["cntl_1"], pll["cntl_5"], pll["use_postdiv"])
+        checks = {"l2cpu_reset": rst == regs.L2CPU_RESET_AT_SESSION_START, "pll4_default": not why_pll,
+                  "enabled_l2cpu": en == 0xF, "wayenable": True, "complete": True, "no_cable_fault": not cable_fault}
+        reasons, warnings = [], []
+        if cable_fault:
+            reasons.append(f"CMFW cable-fault mode (ERROR_STATUS0 0x{err0:x} bit 1): every L2CPU tile is clock-gated")
+        if not checks["l2cpu_reset"]:
+            reasons.append(f"L2CPU_RESET = 0x{rst:02x}, expected 0x{regs.L2CPU_RESET_AT_SESSION_START:02x}"
+                           + (": a tile was released without a chip reset" if rst & 0xF0 else ""))
+        if why_pll:
+            reasons.append(f"PLL4 not at the CMFW defaults: {why_pll}")
+        if not checks["enabled_l2cpu"]:
+            off = [t for t in regs.L2CPU_XY if not en & regs.enabled_l2cpu_bit(t)]
+            reasons.append(f"ENABLED_L2CPU = 0x{en:x}, expected 0xf: L2CPU{off} harvested/disabled (a "
+                           f"{4 - len(off)}-rank plan)")
+        walk_ready = bool(pll["cntl_0"] & regs.PLL_CNTL_0_MASK == regs.PLL_CNTL_0_RUNNING and lock & regs.pll_lock_bit(4))
+        if not walk_ready:
+            warnings.append(f"PLL4 not walk-ready (CNTL_0 0x{pll['cntl_0']:x}, PLL_LOCK 0x{lock:x}): S5b's walk would stop")
+        if k.noc_translation != 1:
+            warnings.append(f"NoC translation off (TAG_NOC_TRANSLATION={k.noc_translation}): no translated cross-read")
+        rep = {"probe": "s5a", "schema": S5A_SCHEMA, "backend": "sim" if self.sim else "device", "tiles_order": list(tiles),
+               "l2cpu_reset": rst, "pll4": pll, "pll4_default": not why_pll, "pll4_why": why_pll, "pll_lock": lock,
+               "pll4_walk_ready": walk_ready, "l2cpuclk_mhz": mhz, "error_status0": err0, "cable_fault": cable_fault,
+               "l2cpuclk_telemetry_mhz": [None if tele.get(g) is None else tele[g] & 0xFFFF for g in regs.TAG_L2CPUCLK],
+               "timer_heartbeat": tele.get(regs.TAG_TIMER_HEARTBEAT), "enabled_l2cpu": en, "noc_translation": xlat,
+               "beu": "not read: the harts are in reset and no source says a hart's BEU answers then (review F7, "
+                      "kmd.read_beu); the BEU baseline comes from the hart side after the release (S5b SELFTEST)",
+               "tiles": {}}
+        for t in tiles:
+            tr = {"xy": list(regs.L2CPU_XY[t]), "enabled": bool(en & regs.enabled_l2cpu_bit(t)),
+                  "released": bool(rst & regs.release_bit(t)), "l2cpuclk_mhz": mhz[t], "probed": False, "reads": 0}
+            rep["tiles"][str(t)] = tr
+            skip = ("CMFW cable-fault mode: tile clock-gated (ERROR_STATUS0 bit 1; R28)" if cable_fault
+                    else f"not enabled (ENABLED_L2CPU 0x{en:x}, bit {t} clear: harvested or disabled)" if not tr["enabled"]
+                    else f"held in reset (L2CPU_RESET 0x{rst:02x}, bit {t} clear; R28)" if not rst & 1 << t
+                    else f"clock off: L2CPUCLK{t} derives to 0 MHz from PLL4 (CNTL_5 0x{pll['cntl_5']:08x}, USE_POSTDIV "
+                         f"0x{pll['use_postdiv']:x}; R28)" if not mhz[t]
+                    else "PLL4 not at its CMFW defaults (§5.2 invariant 4)" if why_pll
+                    else "released: a live hart, and S5a releases none" if tr["released"] else "")
+            if skip:
+                tr["skipped"] = f"{skip}: never read"
+                continue
+            t0 = k.wcio.log_total()
+            try:
+                with self.batch(t):
+                    tr["wayenable"] = k.read_wayenable(t)
+                    tr["ccache_config"] = k.read_ccache_config(t)
+                    if k.noc_translation == 1:
+                        tr["ccache_config_translated"] = k.read_ccache_config(t, translated=True)
+                        tr["cross_read_equal"] = tr["ccache_config"] == tr["ccache_config_translated"]
+                    else:  # review F6: never a translated access with translation off
+                        tr["cross_read"] = f"skipped: NoC translation off (TAG_NOC_TRANSLATION={k.noc_translation})"
+                    tr["ecc"] = k.read_ccache_ecc(t)
+                    tr["hart_status"] = k.read_hart_status(t)
+                    niu = k.read_niu0(t)
+                    tr["niu0"] = {**niu, "node": regs.decode_noc_node_id(niu["noc_node_id"]),
+                                  "endpoint": regs.decode_noc_endpoint_id(niu["noc_endpoint_id"]),
+                                  "translation_enable": bool(niu["niu_cfg_0"] & regs.NIU_CFG_0_TRANSLATION),
+                                  "tile_clock_disable": bool(niu["niu_cfg_0"] & regs.NIU_CFG_0_TILE_CLOCK_DISABLE)}
+                    tr["tlb"] = _tlb_summary(k.read_tlb_slots(t))
+                tr["probed"] = True
+            except (K.KmdError, OSError) as e:
+                tr["error"] = f"{type(e).__name__}: {e}"
+                checks["complete"] = False
+                reasons.append(f"L2CPU{t}: probe stopped: {tr['error']}")
+            tr["reads"] = k.wcio.log_total() - t0
+            if "wayenable" in tr and tr["wayenable"] != regs.WAYENABLE_EXPECTED:
+                checks["wayenable"] = False
+                reasons.append(f"L2CPU{t} CCACHE0_WAYENABLE = {tr['wayenable']}, expected 0 (one-way: needs a chip reset)")
+            warnings += _tile_probe_warnings(t, tr, k.noc_translation)
+        rep["l2cpu_reset_after"], rep["pll4_after"] = k.read_l2cpu_reset(), k.read_pll4()
+        if rep["l2cpu_reset_after"] != rst:
+            checks["l2cpu_reset"] = False
+            reasons.append(f"L2CPU_RESET changed during the probe: 0x{rst:02x} -> 0x{rep['l2cpu_reset_after']:02x}")
+        if rep["pll4_after"] != pll:
+            why = f"PLL4 changed during the probe (CMFW relock?): {K._hexd(pll)} -> {K._hexd(rep['pll4_after'])}"
+            if k.pll4_is_default(rep["pll4_after"]):
+                warnings.append(why)
+            else:
+                checks["pll4_default"] = False
+                reasons.append(why)
+        rep.update(checks=checks, reasons=reasons, warnings=warnings, dirty=bool(reasons),
+                   verdict="dirty" if reasons else "clean", attachable=False, reads=k.wcio.log_total() - n0,
+                   harvested=[t for t in regs.L2CPU_XY if not en & regs.enabled_l2cpu_bit(t)])
+        return rep
+
     # -- payloads (E2, E2m) --
     def load_code(self, t: int, data: bytes, dst: int = regs.WEIGHTS_BASE, fence: bool = True) -> dict:
         mb = self.mb[t]
@@ -2594,6 +2769,10 @@ def run_admin(s: Session, cmd: str, **kw) -> dict:
     live = s.mode in ("booted", "attached")
     if cmd == "e0":
         return s.e0()
+    if cmd == "tiles_probe":  # S5a: `probe --tile LIST --via URL` on a `serve --no-release --probe-tiles` daemon
+        if live:
+            raise X280Error(f"tiles probe (S5a): a no-release session only (mode {s.mode})")
+        return s.tiles_probe(tuple(kw.get("tiles") or s.k.probe_tiles))
     if cmd in LIM_WRITERS or (cmd == "lim_check" and (kw.get("partial") or kw.get("cleanup_check"))):
         if live:
             raise X280Error(f"{cmd} writes LIM lines and L38: only in a --no-release session (mode {s.mode})")
@@ -2837,8 +3016,46 @@ def _dry_run_dump(sess: Session) -> None:
                                        "fake_calls": [c[0] for c in sess.k.backend.calls]}, default=_jsonable))
 
 
+def cmd_probe_tiles(args, tiles: tuple) -> int:
+    """S5a: `probe --tile 3,2,1,0` (Session.tiles_probe), standalone on its own keeper fd like chip_session's step 1,
+    or `--via URL` on the session's serving `serve --no-release --probe-tiles` daemon (§5.2 invariant 3: inside a
+    session that daemon holds the only fd). One JSON object (S5A_SCHEMA) with 'dirty', 'verdict', 'reasons' and a
+    section per tile; exit tiles_probe_rc (0 clean, 3 dirty, 4 harvested only, 1 no report)."""
+    if len(set(tiles)) != len(tiles) or any(t not in regs.L2CPU_XY for t in tiles):
+        log(f"probe: --tile {','.join(map(str, tiles))}: each of the L2CPU tiles {tuple(regs.L2CPU_XY)} at most once")
+        return 2
+    if args.via:
+        try:
+            rep = _admin_call(args.via, "tiles_probe", 120.0, tiles=list(tiles))
+        except X280Error as e:
+            rep = {"error": str(e)}
+        _print(rep)
+        return tiles_probe_rc(rep)
+    sess = Session("sim" if args.dry_run else args.backend, (regs.DEFAULT_TILE,), dtype=args.dtype,
+                   variant=args.variant, ledger_path=args.ledger, cross_read=True, hart=False, probe_tiles=tiles,
+                   first_poll_us=args.first_poll_us, sim_ecc=getattr(args, "sim_ecc", None))
+    try:
+        sess.open()
+        rep = sess.tiles_probe(tiles)
+        rc = tiles_probe_rc(rep)
+    except K.DeviceAccessRefused as e:
+        rep, rc = {"error": f"device refused: {e}"}, 2
+    except (X280Error, K.KmdError, OSError) as e:
+        rep, rc = {"error": f"{type(e).__name__}: {e}"}, 1
+    finally:
+        sess.close()
+    if args.dry_run:
+        _dry_run_dump(sess)
+    _print(rep)
+    return rc
+
+
 def cmd_probe(args) -> int:
-    """chip_session step 1: one JSON object with a boolean 'dirty' (+ reasons, attachable); exit 0 / 3 / 4."""
+    """chip_session step 1: one JSON object with a boolean 'dirty' (+ reasons, attachable); exit 0 / 3 / 4. With more
+    than one --tile, a tile outside regs.WRITABLE_TILES or --via: the S5a probe (cmd_probe_tiles)."""
+    tiles = _tiles(args.tile)
+    if args.via or len(tiles) > 1 or tiles[0] not in regs.WRITABLE_TILES:
+        return cmd_probe_tiles(args, tiles)
     sess = _session(args, cross_read=True, hart=False)
     rep = {"dirty": False, "reasons": [], "attachable": False, "backend": "sim" if sess.sim else "device"}
     rc = 0
@@ -2985,6 +3202,12 @@ def cmd_serve(args) -> int:
     if mode == "boot" and not sim and not method_a_allowed():
         log(f"serve --boot: {METHOD_A_REFUSED}")
         return 2
+    probe_tiles = _tiles([args.probe_tiles]) if args.probe_tiles else ()
+    if probe_tiles and (mode != "no_release" or any(t not in regs.L2CPU_XY for t in probe_tiles)
+                        or len(set(probe_tiles)) != len(probe_tiles)):
+        log(f"serve --probe-tiles {args.probe_tiles} (S5a): L2CPU tiles {tuple(regs.L2CPU_XY)}, each once, and only "
+            "with --no-release")
+        return 2
     if args.cpus:
         os.sched_setaffinity(0, _cpu_list(args.cpus))  # before any thread or socket exists
     if sim and not args.sim_cpus and mode != "no_release":
@@ -3002,7 +3225,8 @@ def cmd_serve(args) -> int:
     if log_dir:
         log_dir.mkdir(parents=True, exist_ok=True)
     try:
-        sess = _session(args, cross_read=mode == "no_release", hart=mode != "no_release")
+        sess = _session(args, cross_read=mode == "no_release", hart=mode != "no_release",
+                        **({"probe_tiles": probe_tiles} if probe_tiles else {}))
     except (X280Error, FileNotFoundError, ValueError) as e:
         log(f"serve: {e}")
         return 2
@@ -3280,7 +3504,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("probe", parents=[common], help="L2CPU health check (chip_session step 1)")
+    p = sub.add_parser("probe", parents=[common], help="L2CPU health check (chip_session step 1); --tile 3,2,1,0 "
+                                                       "(or --via): the S5a read-only probe of several tiles")
     p.add_argument("--json", action="store_true", help="(always JSON on the last stdout line)")
     p.set_defaults(fn=cmd_probe)
 
@@ -3294,6 +3519,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("serve", parents=[common], help="W-WBC on REP 127.0.0.1:PORT")
     p.add_argument("--port", type=int, default=5558)
     p.add_argument("--no-release", action="store_true", help="S1c: keeper fd and windows, never release")
+    p.add_argument("--probe-tiles", default=None, help="S5a, with --no-release only: read-only probe windows on these "
+                                                       "L2CPU tiles (e.g. 3,2,1,0) for `probe --tile LIST --via`")
     p.add_argument("--stage0", action="store_true", help="E1F boot, the standard one (X280_E1F_APPROVED=1 only, DP3(d))")
     p.add_argument("--early", action="store_true", help="enable gear_wbc_dispatch/collect (WP-3.8b)")
     p.add_argument("--slow", action="store_true", help="m3_rt_slow deadline (12 ms, DP11)")

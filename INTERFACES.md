@@ -623,6 +623,22 @@ lowest CPU, the zmq I/O thread on the highest: `2,3`), `--spin` busy-polls each 
 9 ms, host overhead p99 <= 0.3 ms with data on the device, the sim exempt; 0 timeouts and errors), `pass` = all of
 them, and `reported` = the client RTT row (`client_rtt_p99_le_limit`, not gated) and the client placement.
 `powertest --watch-s S` ends each watch with a PLL4 read (`pll4_default_after_each` gets one more entry).
+`probe --tile LIST` with more than one tile, a tile outside `regs.WRITABLE_TILES`, or `--via URL` (S5a,
+`jobs/s5a_probe.sh`): the read-only probe of those L2CPU tiles in that order (`Session.tiles_probe`), standalone on its
+own keeper fd or on a `serve --no-release --probe-tiles LIST` daemon (admin `tiles_probe`); nothing is written. ARC
+first; every tile is skipped, never read, in CMFW cable-fault mode (ERROR_STATUS0 = SCRATCH_RAM[4] bit 1: all tiles
+outside column 15 clock-gated), and so is a tile not enabled, held in reset (its L2CPU_RESET[3:0] bit clear), at 0 MHz,
+released, or any tile with PLL4 off its defaults; the BEUs are not read (harts in reset, review F7). In a probe session
+every probe tile, the session's own included, refuses every write. Reply (schema 1): {probe "s5a", schema, backend, tiles_order, l2cpu_reset,
+pll4, pll4_default, pll4_why, pll_lock, pll4_walk_ready, l2cpuclk_mhz, error_status0, cable_fault, l2cpuclk_telemetry_mhz, timer_heartbeat,
+enabled_l2cpu, noc_translation, beu, tiles {t: {xy, enabled, released, l2cpuclk_mhz, probed, reads, then skipped, or
+wayenable, ccache_config, ccache_config_translated + cross_read_equal (or cross_read), ecc, hart_status, niu0
+{noc_node_id, noc_endpoint_id, niu_cfg_0, node, endpoint, translation_enable, tile_clock_disable}, tlb {small (224 x 4
+words), large (32 x 3), small/large_distinct, small/large_nonzero}, error}}, l2cpu_reset_after, pll4_after, checks
+{l2cpu_reset, pll4_default, enabled_l2cpu, wayenable, complete, no_cable_fault} (only these gate), reasons, warnings, dirty, verdict
+clean|dirty, attachable false, reads, harvested}; exit 0 clean, 3 dirty, 4 only ENABLED_L2CPU != 0xF, 1 no report, 2 a
+bad tile list. `serve --probe-tiles LIST` (with `--no-release` only, else exit 2): per extra tile a read-only CCACHE0
+window (+ the translated one), and every xp prefix reaches NIU #0 (0x15_7000 B, transient read-only mappings).
 serve: `--backend device|sim`, `--no-release` (S1c),
 `--boot`, `--attach`, `--stage0` (E1F, needs X280_E1F_APPROVED=1; every M3 session's boot since 2026-10-25),
 `--harts 4` (S3b, the 4-hart bench: with `--stage0` and X280_MH_APPROVED=1 only, L2CPU3 only; before the release harts
@@ -647,7 +663,8 @@ clean, full_lim_write_s}, `clean_variants`, `integrity` (L2CPU_RESET, WAYENABLE 
 `degraded`, `status_pub`. Replies add `x280d_us`, `mailbox_us`, `cycles`, `mb_seq` to the §1.4.3 fields; any
 failure is an error reply (the client falls back to ORT). `--early`: `gear_wbc_dispatch` / `gear_wbc_collect`
 (WP-3.8b). x280d_admin commands: status, info, park, inject, dump (the tick ring) and the subcommands above (`harts`:
-harts_adopt, mh_status, mh_ping; `bench --mh`: bench_mh). `harts adopt` (one pulse of RNMI bits 1-3, refused by kmd
+harts_adopt, mh_status, mh_ping; `bench --mh`: bench_mh; `probe --tile LIST --via`: tiles_probe). `harts adopt` (one
+pulse of RNMI bits 1-3, refused by kmd
 without this session's --harts 4 vectors, the E1F 'stub' state and L36.mh's multi-hart bit, never with bit 0) replies
 {pass, adopted, lost, harts {state, entries, mncause, mnepc, mode, mip, heartbeat_moving, beu}, ping {done, wake_ticks,
 total_ticks, ready}, hart_status_before/after (raw 0x2001_0400)}; `bench --mh` replies {configs [{name, kernel, kernel0,

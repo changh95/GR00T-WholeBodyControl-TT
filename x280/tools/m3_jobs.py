@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """The verdict logic of the M3 device-session jobs, kept out of their shell heredocs so a CPU test can run it
-(PLAN.md WP-3.5, WP-3.8, WP-3.9; jobs/s1c.sh, jobs/s1d.sh, jobs/m3_shadow.sh, jobs/m3_eval.sh, jobs/m3_faults.sh,
-jobs/m3_soak.sh; tests/x280/test_m3_jobs.py).
+(PLAN.md WP-3.5, WP-3.8, WP-3.9; jobs/s1c.sh, jobs/s1d.sh, jobs/s5a_probe.sh, jobs/m3_shadow.sh, jobs/m3_eval.sh,
+jobs/m3_faults.sh, jobs/m3_soak.sh; tests/x280/test_m3_jobs.py).
 
     python3 $RT/x280/tools/m3_jobs.py s1c-summary SESSION_DIR E1A_OK METHOD [k=rc ...]   # S1c + S2 go/no-go
     python3 $RT/x280/tools/m3_jobs.py s1d-summary SESSION_DIR [k=rc ...]                 # S1d: lim-init store
+    python3 $RT/x280/tools/m3_jobs.py s5a-summary SESSION_DIR [k=rc ...]                 # S5a: L2CPU0-3 probe
     simpy $RT/x280/tools/m3_jobs.py m3-gates GATES_YAML OUT_YAML BENCH|none DTYPE         # T-3.7 session gate sets
     python3 $RT/x280/tools/m3_jobs.py t37-summary VERDICT BEFORE AFTER DUMP BENCH|none OUT
     python3 $RT/x280/tools/m3_jobs.py t36-gates OUT_YAML DTYPE
@@ -203,6 +204,120 @@ def s1c_summary(d: Path, e1a_ok: bool, method: str, rc: dict) -> dict:
         s["next"] = "E1F stage-0 (jobs/s1f_stage0.sh) - ask the user for DP3(d) approval first"
     s["s2"] = s2_verdict(e0k if isinstance(e0k, dict) else None, e0t if isinstance(e0t, dict) else None, e1a_ok)
     s["ecc"] = s1c_ecc(d)
+    return s
+
+
+# --- S5a (jobs/s5a_probe.sh): the read-only probe of L2CPU0-3, then again with server_g1 serving ----------------------
+
+S5A_TT_P50_BAND = 0.02  # S5a step_plan / T-3.E0: TT p50 within +-2 % of the baseline taken before the second probe
+
+
+def _probe_view(p) -> Optional[dict]:
+    """The fields of an `x280d probe --tile LIST` report (x280d.S5A_SCHEMA) two probes of one unchanged chip must
+    repeat: everything read except TIMER_HEARTBEAT, the telemetry clocks and the read counts."""
+    if not isinstance(p, dict) or not isinstance(p.get("checks"), dict):
+        return None
+    tiles = {}
+    for t, tr in sorted((p.get("tiles") or {}).items()):
+        v = {k: tr.get(k) for k in ("enabled", "released", "probed", "skipped", "error", "wayenable", "ccache_config",
+                                    "ccache_config_translated", "ecc", "hart_status")}
+        niu, tlb = tr.get("niu0") or {}, tr.get("tlb") or {}
+        v["niu0"] = {k: niu.get(k) for k in ("noc_node_id", "noc_endpoint_id", "niu_cfg_0")} if niu else None
+        v["tlb"] = {k: tlb.get(k) for k in ("small", "large")} if tlb else None
+        tiles[t] = v
+    return {**{k: p.get(k) for k in ("l2cpu_reset", "pll4", "pll_lock", "enabled_l2cpu", "noc_translation",
+                                     "tiles_order")}, "tiles": tiles}
+
+
+def _diffs(a, b, path: str = "", out: Optional[list] = None, limit: int = 20) -> list:
+    """'path: a -> b' for each leaf where two JSON values differ (at most `limit`)."""
+    out = [] if out is None else out
+    if len(out) >= limit:
+        return out
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in sorted(set(a) | set(b), key=str):
+            _diffs(a.get(k), b.get(k), f"{path}.{k}" if path else str(k), out, limit)
+    elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        for i, (x, y) in enumerate(zip(a, b)):
+            _diffs(x, y, f"{path}[{i}]", out, limit)
+    elif a != b:
+        out.append(f"{path}: {a!r} -> {b!r}")
+    return out
+
+
+def _probe_brief(p, rc) -> dict:
+    p = p if isinstance(p, dict) else {}
+    return {"rc": rc, "verdict": p.get("verdict") or "no report", "reasons": p.get("reasons"),
+            "warnings": p.get("warnings"), "error": p.get("error"), "reads": p.get("reads")}
+
+
+def _s5a_tile_line(t: str, tr: dict) -> str:
+    head = f"S5a L2CPU{t} ({tr.get('xy', ['?', '?'])[0]},{tr.get('xy', ['?', '?'])[1]}): "
+    if tr.get("skipped"):
+        return head + f"skipped, {tr['skipped']}"
+    if tr.get("error"):
+        return head + f"probe stopped: {tr['error']}"
+    ecc, niu, tlb = tr.get("ecc") or {}, tr.get("niu0") or {}, tr.get("tlb") or {}
+    cross = tr.get("cross_read_equal")
+    return head + (f"WAYENABLE {tr.get('wayenable')}, CCACHE0_CONFIG {_hex(tr.get('ccache_config'))} (translated "
+                   f"{'equal' if cross else 'DIFFERS' if cross is False else 'not read'}), ECC fix/fail dir "
+                   f"{ecc.get('dir_fix_count')}/{ecc.get('dir_fail_count')} dat {ecc.get('dat_fix_count')}/"
+                   f"{ecc.get('dat_fail_count')}, hart status {_hex(tr.get('hart_status'))}, NOC_NODE_ID "
+                   f"{_hex(niu.get('noc_node_id'))}, NOC_ENDPOINT_ID {_hex(niu.get('noc_endpoint_id'))}, NIU_CFG_0 "
+                   f"{_hex(niu.get('niu_cfg_0'))}, TLB slots nonzero {tlb.get('small_nonzero')}/{regs.TLB_SMALL_N} small "
+                   f"({len(tlb.get('small_distinct') or [])} distinct), {tlb.get('large_nonzero')}/{regs.TLB_LARGE_N} "
+                   f"large ({len(tlb.get('large_distinct') or [])} distinct)")
+
+
+def s5a_summary(d: Path, rc: dict) -> dict:
+    """jobs/s5a_probe.sh's s5a_summary.json: both probe verdicts, the per-tile baselines, the two probes compared field
+    by field (no interference from server_g1), TT bit-identity and p50, and the S5a -> S5b go/no-go."""
+    d = Path(d)
+    pk, pt = _json(d / "s5a_probe_keeper.json"), _json(d / "s5a_probe_tt.json")
+    dig = [_json(d / f"s5a_tt_digest_{i}.json") for i in range(2)]
+
+    def p50(b):
+        return ((b or {}).get("latency") or {}).get("rtt_ms", {}).get("p50")
+    p0, p1 = p50(_json(d / "s5a_tt_lat_0.json")), p50(_json(d / "s5a_tt_lat_1.json"))
+    vk, vt = _probe_view(pk), _probe_view(pt)
+    diffs = _diffs(vk, vt) if vk and vt else None
+    s = {"probe_keeper": _probe_brief(pk, rc.get("probe_keeper")), "probe_tt": _probe_brief(pt, rc.get("probe_tt")),
+         "probes_equal": diffs == [], "probe_diffs": diffs,
+         "tt_bit_identical": bool(dig[0]) and dig[0] == dig[1], "tt_p50_ms": [p0, p1],
+         "tt_p50_change": (p1 / p0 - 1) if p0 and p1 else None,
+         "tt_max_ms_during_probe": ((_json(d / "s5a_tt_lat_probe.json") or {}).get("latency") or {}).get(
+             "rtt_ms", {}).get("max"),
+         "harvested": (pk or {}).get("harvested") if isinstance(pk, dict) else None}
+    s["tt_p50_within_2pct"] = s["tt_p50_change"] is not None and abs(s["tt_p50_change"]) <= S5A_TT_P50_BAND
+    why, notes = [], []
+    for name, label in (("probe_keeper", "the probe with the keeper fd"), ("probe_tt", "the probe with server_g1 serving")):
+        b = s[name]
+        if b["verdict"] != "clean":
+            why.append(f"{label}: {b['verdict']}: " + "; ".join(b["reasons"] or [b["error"] or "no JSON report"]))
+        notes += [f"{label}: {w}" for w in b["warnings"] or []]
+    if s["harvested"]:
+        notes.append(f"L2CPU{s['harvested']} harvested/disabled: S5b-S5e as planned need four ranks; re-plan with "
+                     f"{4 - len(s['harvested'])}")
+    if diffs:
+        why.append(f"the two probes differ ({len(diffs)}{'+' if len(diffs) >= 20 else ''}): " + "; ".join(diffs[:5]))
+    elif diffs is None and not why:
+        why.append("the two probes cannot be compared (a report is missing)")
+    if not s["tt_bit_identical"]:
+        why.append(f"TT predict_debug digests differ or are missing: {dig}")
+    if not s["tt_p50_within_2pct"]:
+        why.append(f"TT p50 {p0} -> {p1} ms (change {s['tt_p50_change']}): not within +-{S5A_TT_P50_BAND:.0%}")
+    s["tiles"] = {t: tr for t, tr in ((pk or {}).get("tiles") or {}).items()} if isinstance(pk, dict) else {}
+    s["pass"] = not why
+    s["s5b"] = {"go": not why, "why": why, "notes": notes}
+    lines = [_s5a_tile_line(t, s["tiles"][str(t)]) for t in ((pk or {}).get("tiles_order") or [])
+             if str(t) in s["tiles"]]
+    lines.append(f"S5a TT: bit-identical {s['tt_bit_identical']}, p50 {p0} -> {p1} ms, max during the probe "
+                 f"{s['tt_max_ms_during_probe']} ms; probes equal {s['probes_equal']}")
+    lines.append("S5a -> S5b: GO" if not why else "S5a -> S5b: NO-GO: " + "; ".join(why))
+    s["lines"] = lines
+    for tr in s["tiles"].values():  # the raw slot words stay in the probe reports; the summary keeps their digest
+        if isinstance(tr.get("tlb"), dict):
+            tr["tlb"] = {k: v for k, v in tr["tlb"].items() if k not in ("small", "large")}
     return s
 
 
@@ -602,6 +717,9 @@ def main(argv=None) -> int:
     p = sub.add_parser("s1d-summary")
     p.add_argument("dir", type=Path)
     p.add_argument("rc", nargs="*", help="step=rc pairs")
+    p = sub.add_parser("s5a-summary")
+    p.add_argument("dir", type=Path)
+    p.add_argument("rc", nargs="*", help="step=rc pairs")
     p = sub.add_parser("m3-gates")
     p.add_argument("src", type=Path)
     p.add_argument("dst", type=Path)
@@ -642,6 +760,10 @@ def main(argv=None) -> int:
         elif a.cmd == "s1d-summary":
             r = s1d_summary(a.dir, dict(kv.split("=", 1) for kv in a.rc))
             (a.dir / "s1d_summary.json").write_text(json.dumps(r, indent=1))
+            ok = r["pass"]
+        elif a.cmd == "s5a-summary":
+            r = s5a_summary(a.dir, dict(kv.split("=", 1) for kv in a.rc))
+            (a.dir / "s5a_summary.json").write_text(json.dumps(r, indent=1))
             ok = r["pass"]
         elif a.cmd == "m3-gates":
             r, ok = m3_gates(a.src, a.dst, _opt(a.bench), a.dtype), True
